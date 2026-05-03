@@ -1,0 +1,705 @@
+Name,Symbol,Primary Exchange
+Cboe Global Markets,CBOE,BATS
+Paramount Skydance Corporation,PSKY,NASDAQ
+Nvidia,NVDA,NASDAQ
+Apple Inc.,AAPL,NASDAQ
+Alphabet Inc. (Class A),GOOGL,NASDAQ
+Alphabet Inc. (Class C),GOOG,NASDAQ
+Microsoft,MSFT,NASDAQ
+Amazon,AMZN,NASDAQ
+Meta Platforms,META,NASDAQ
+Broadcom,AVGO,NASDAQ
+"Tesla, Inc.",TSLA,NASDAQ
+Coinbase,COIN,NASDAQ
+Robinhood Markets,HOOD,NASDAQ
+Netflix,NFLX,NASDAQ
+Costco,COST,NASDAQ
+Advanced Micro Devices,AMD,NASDAQ
+Micron Technology,MU,NASDAQ
+T. Rowe Price,TROW,NASDAQ
+Cisco,CSCO,NASDAQ
+Lam Research,LRCX,NASDAQ
+Applied Materials,AMAT,NASDAQ
+T-Mobile US,TMUS,NASDAQ
+Shopify Inc.,SHOP,NASDAQ
+AppLovin,APP,NASDAQ
+Intuitive Surgical,ISRG,NASDAQ
+PayPal,PYPL,NASDAQ
+PepsiCo,PEP,NASDAQ
+Qualcomm,QCOM,NASDAQ
+Intel,INTC,NASDAQ
+KLA Corporation,KLAC,NASDAQ
+Intuit,INTU,NASDAQ
+Booking Holdings,BKNG,NASDAQ
+Amgen,AMGN,NASDAQ
+Texas Instruments,TXN,NASDAQ
+Northern Trust,NTRS,NASDAQ
+Gilead Sciences,GILD,NASDAQ
+Adobe Inc.,ADBE,NASDAQ
+Analog Devices,ADI,NASDAQ
+Honeywell,HON,NASDAQ
+Palo Alto Networks,PANW,NASDAQ
+Interactive Brokers,IBKR,NASDAQ
+CrowdStrike,CRWD,NASDAQ
+Vertex Pharmaceuticals,VRTX,NASDAQ
+Automatic Data Processing,ADP,NASDAQ
+Comcast,CMCSA,NASDAQ
+Constellation Energy,CEG,NASDAQ
+Starbucks,SBUX,NASDAQ
+Synopsys,SNPS,NASDAQ
+"Nasdaq, Inc.",NDAQ,NASDAQ
+Marriott International,MAR,NASDAQ
+Airbnb,ABNB,NASDAQ
+Cadence Design Systems,CDNS,NASDAQ
+Regeneron Pharmaceuticals,REGN,NASDAQ
+O'Reilly Automotive,ORLY,NASDAQ
+Equinix,EQIX,NASDAQ
+Cintas,CTAS,NASDAQ
+Monster Beverage,MNST,NASDAQ
+Warner Bros. Discovery,WBD,NASDAQ
+Mondelez International,MDLZ,NASDAQ
+Fifth Third Bancorp,FITB,NASDAQ
+CSX Corporation,CSX,NASDAQ
+Huntington Bancshares,HBAN,NASDAQ
+Western Digital,WDC,NASDAQ
+Seagate Technology,STX,NASDAQ
+Autodesk,ADSK,NASDAQ
+Principal Financial Group,PFG,NASDAQ
+Ross Stores,ROST,NASDAQ
+Paccar,PCAR,NASDAQ
+Baker Hughes,BKR,NASDAQ
+Fortinet,FTNT,NASDAQ
+NXP Semiconductors,NXPI,NASDAQ
+"Workday, Inc.",WDAY,NASDAQ
+Idexx Laboratories,IDXX,NASDAQ
+Electronic Arts,EA,NASDAQ
+Take-Two Interactive,TTWO,NASDAQ
+Fastenal,FAST,NASDAQ
+Datadog,DDOG,NASDAQ
+Roper Technologies,ROP,NASDAQ
+Monolithic Power Systems,MPWR,NASDAQ
+Axon Enterprise,AXON,NASDAQ
+APA Corporation,APA,NASDAQ
+eBay Inc.,EBAY,NASDAQ
+Jack Henry & Associates,JKHY,NASDAQ
+Cognizant,CTSH,NASDAQ
+Paychex,PAYX,NASDAQ
+GE HealthCare,GEHC,NASDAQ
+Copart,CPRT,NASDAQ
+United Airlines Holdings,UAL,NASDAQ
+Keurig Dr Pepper,KDP,NASDAQ
+Microchip Technology,MCHP,NASDAQ
+Expedia Group,EXPE,NASDAQ
+Teradyne,TER,NASDAQ
+Expand Energy,EXE,NASDAQ
+Old Dominion,ODFL,NASDAQ
+Fox Corporation (Class B),FOX,NASDAQ
+Fox Corporation (Class A),FOXA,NASDAQ
+Cincinnati Financial,CINF,NASDAQ
+Alliant Energy,LNT,NASDAQ
+Verisk Analytics,VRSK,NASDAQ
+First Solar,FSLR,NASDAQ
+CoStar Group,CSGP,NASDAQ
+Kraft Heinz,KHC,NASDAQ
+Ulta Beauty,ULTA,NASDAQ
+Charter Communications,CHTR,NASDAQ
+American Electric Power,AEP,NASDAQ
+Willis Towers Watson,WTW,NASDAQ
+Dexcom,DXCM,NASDAQ
+Tractor Supply,TSCO,NASDAQ
+Biogen,BIIB,NASDAQ
+Dollar Tree,DLTR,NASDAQ
+Steel Dynamics,STLD,NASDAQ
+Lululemon Athletica,LULU,NASDAQ
+Diamondback Energy,FANG,NASDAQ
+ON Semiconductor,ON,NASDAQ
+Verisign,VRSN,NASDAQ
+NetApp,NTAP,NASDAQ
+PTC Inc.,PTC,NASDAQ
+SBA Communications,SBAC,NASDAQ
+Incyte,INCY,NASDAQ
+Insulet Corporation,PODD,NASDAQ
+C.H. Robinson,CHRW,NASDAQ
+Trade Desk,TTD,NASDAQ
+J.B. Hunt,JBHT,NASDAQ
+Trimble Inc.,TRMB,NASDAQ
+Supermicro,SMCI,NASDAQ
+CDW Corporation,CDW,NASDAQ
+Hologic,HOLX,NASDAQ
+Cooper Companies,COO,NASDAQ
+Gen Digital,GEN,NASDAQ
+"F5, Inc.",FFIV,NASDAQ
+News Corp (Class A),NWSA,NASDAQ
+News Corp (Class B),NWS,NASDAQ
+Viatris,VTRS,NASDAQ
+Nordson Corporation,NDSN,NASDAQ
+Xcel Energy,XEL,NASDAQ
+Zebra Technologies,ZBRA,NASDAQ
+Moderna,MRNA,NASDAQ
+Regency Centers,REG,NASDAQ
+Exelon,EXC,NASDAQ
+Host Hotels & Resorts,HST,NASDAQ
+Wynn Resorts,WYNN,NASDAQ
+Akamai Technologies,AKAM,NASDAQ
+Arch Capital Group,ACGL,NASDAQ
+Hasbro,HAS,NASDAQ
+Align Technology,ALGN,NASDAQ
+Colliers International Group Inc.,CIGI,NASDAQ
+Bio-Techne,TECH,NASDAQ
+Skyworks Solutions,SWKS,NASDAQ
+FirstService Corporation,FSV,NASDAQ
+Henry Schein,HSIC,NASDAQ
+Pool Corporation,POOL,NASDAQ
+Erie Indemnity,ERIE,NASDAQ
+Open Text Corporation,OTEX,NASDAQ
+LKQ Corporation,LKQ,NASDAQ
+Match Group,MTCH,NASDAQ
+CME Group,CME,NASDAQ
+Solventum,SOLV,NYSE
+Smurfit Westrock,SW,NYSE
+Veralto,VLTO,NYSE
+Kenvue,KVUE,NYSE
+Dell Technologies,DELL,NYSE
+GE Vernova,GEV,NYSE
+"Block, Inc.",XYZ,NYSE
+Campbell's Company,CPB,NYSE
+Domino's,DPZ,NYSE
+DoorDash,DASH,NYSE
+Evergy,EVRG,NYSE
+Expeditors International,EXPD,NYSE
+Kimberly-Clark,KMB,NYSE
+Linde plc,LIN,NYSE
+Palantir Technologies,PLTR,NYSE
+Lilly (Eli),LLY,NYSE
+KKR & Co.,KKR,NYSE
+Oracle Corporation,ORCL,NYSE
+Blackstone Inc.,BX,NYSE
+Brookfield Corporation,BN,NYSE
+Johnson & Johnson,JNJ,NYSE
+Invesco,IVZ,NYSE
+AbbVie,ABBV,NYSE
+Home Depot,HD,NYSE
+GE Aerospace,GE,NYSE
+Apollo Global Management,APO,NYSE
+Procter & Gamble,PG,NYSE
+UnitedHealth Group,UNH,NYSE
+BlackRock,BLK,NYSE
+Coca-Cola Company,KO,NYSE
+Caterpillar Inc.,CAT,NYSE
+Moody's Corporation,MCO,NYSE
+IBM,IBM,NYSE
+Merck & Co.,MRK,NYSE
+Franklin Resources,BEN,NYSE
+RTX Corporation,RTX,NYSE
+Philip Morris International,PM,NYSE
+State Street Corporation,STT,NYSE
+Salesforce,CRM,NYSE
+Thermo Fisher Scientific,TMO,NYSE
+Synchrony Financial,SYF,NYSE
+Abbott Laboratories,ABT,NYSE
+McDonald's,MCD,NYSE
+Walt Disney Company,DIS,NYSE
+Vistra Corp.,VST,NYSE
+Boeing,BA,NYSE
+AT&T,T,NYSE
+Brookfield Asset Management Ltd.,BAM,NYSE
+Arista Networks,ANET,NYSE
+Amphenol,APH,NYSE
+TJX Companies,TJX,NYSE
+Verizon,VZ,NYSE
+Goldman Sachs,GS,NYSE
+Uber,UBER,NYSE
+Danaher Corporation,DHR,NYSE
+MSCI Inc.,MSCI,NYSE
+Accenture,ACN,NYSE
+Bank of America,BAC,NYSE
+ServiceNow,NOW,NYSE
+Pfizer,PFE,NYSE
+Boston Scientific,BSX,NYSE
+Union Pacific Corporation,UNP,NYSE
+Lowe's,LOW,NYSE
+Stryker Corporation,SYK,NYSE
+Welltower,WELL,NYSE
+Deere & Company,DE,NYSE
+Eaton Corporation,ETN,NYSE
+Medtronic,MDT,NYSE
+Ameriprise Financial,AMP,NYSE
+NRG Energy,NRG,NYSE
+S&P Global,SPGI,NYSE
+Morgan Stanley,MS,NYSE
+Prologis,PLD,NYSE
+Lockheed Martin,LMT,NYSE
+Parker Hannifin,PH,NYSE
+Newmont,NEM,NYSE
+Citigroup,C,NYSE
+American Express,AXP,NYSE
+HCA Healthcare,HCA,NYSE
+Bristol Myers Squibb,BMY,NYSE
+CVS Health,CVS,NYSE
+McKesson Corporation,MCK,NYSE
+Capital One,COF,NYSE
+General Dynamics,GD,NYSE
+Brookfield Renewable Partners L.P.,BEP,NYSE
+BNY Mellon,BK,NYSE
+"Nike, Inc.",NKE,NYSE
+Altria,MO,NYSE
+Wells Fargo,WFC,NYSE
+KeyCorp,KEY,NYSE
+Citizens Financial Group,CFG,NYSE
+JPMorgan Chase,JPM,NYSE
+U.S. Bancorp,USB,NYSE
+Intercontinental Exchange,ICE,NYSE
+Waste Management,WM,NYSE
+Agnico Eagle Mines Limited,AEM,NYSE
+Northrop Grumman,NOC,NYSE
+3M,MMM,NYSE
+Trane Technologies,TT,NYSE
+United Parcel Service,UPS,NYSE
+Regions Financial Corporation,RF,NYSE
+Howmet Aerospace,HWM,NYSE
+PNC Financial Services,PNC,NYSE
+American Tower,AMT,NYSE
+Sherwin-Williams,SHW,NYSE
+Emerson Electric,EMR,NYSE
+Elevance Health,ELV,NYSE
+Freeport-McMoRan,FCX,NYSE
+General Motors,GM,NYSE
+TransDigm Group,TDG,NYSE
+Royal Caribbean Group,RCL,NYSE
+Corning Inc.,GLW,NYSE
+Cigna,CI,NYSE
+Raymond James Financial,RJF,NYSE
+AES Corporation,AES,NYSE
+Ecolab,ECL,NYSE
+Johnson Controls,JCI,NYSE
+Cummins,CMI,NYSE
+Illinois Tool Works,ITW,NYSE
+FedEx,FDX,NYSE
+TE Connectivity,TEL,NYSE
+Prudential Financial,PRU,NYSE
+Hilton Worldwide,HLT,NYSE
+Republic Services,RSG,NYSE
+Quanta Services,PWR,NYSE
+Norfolk Southern,NSC,NYSE
+Charles Schwab Corporation,SCHW,NYSE
+Oneok,OKE,NYSE
+Motorola Solutions,MSI,NYSE
+Fidelity National Information Services,FIS,NYSE
+Colgate-Palmolive,CL,NYSE
+Phillips 66,PSX,NYSE
+Simon Property Group,SPG,NYSE
+Truist Financial,TFC,NYSE
+L3Harris,LHX,NYSE
+Targa Resources,TRGP,NYSE
+Mastercard,MA,NYSE
+Aon plc,AON,NYSE
+United Rentals,URI,NYSE
+Zoetis,ZTS,NYSE
+Becton Dickinson,BDX,NYSE
+Air Products,APD,NYSE
+Corpay,CPAY,NYSE
+Edison International,EIX,NYSE
+Visa Inc.,V,NYSE
+Brown & Brown,BRO,NYSE
+AutoZone,AZO,NYSE
+Global Payments,GPN,NYSE
+Ford Motor Company,F,NYSE
+Digital Realty,DLR,NYSE
+Realty Income,O,NYSE
+Chipotle Mexican Grill,CMG,NYSE
+Valero Energy,VLO,NYSE
+Halliburton,HAL,NYSE
+CBRE Group,CBRE,NYSE
+Edwards Lifesciences,EW,NYSE
+Cardinal Health,CAH,NYSE
+Ametek,AME,NYSE
+Atmos Energy,ATO,NYSE
+W. W. Grainger,GWW,NYSE
+Marsh McLennan,MRSH,NYSE
+Delta Air Lines,DAL,NYSE
+MetLife,MET,NYSE
+Target Corporation,TGT,NYSE
+Corteva,CTVA,NYSE
+Public Storage,PSA,NYSE
+Eversource Energy,ES,NYSE
+Rockwell Automation,ROK,NYSE
+Carrier Global,CARR,NYSE
+"Waste Connections, Inc.",WCN,NYSE
+American Water Works,AWK,NYSE
+FactSet,FDS,NYSE
+Las Vegas Sands,LVS,NYSE
+NextEra Energy,NEE,NYSE
+Sempra,SRE,NYSE
+D. R. Horton,DHI,NYSE
+Marathon Petroleum,MPC,NYSE
+Yum! Brands,YUM,NYSE
+Texas Pacific Land Corporation,TPL,NYSE
+Carnival,CCL,NYSE
+Agilent Technologies,A,NYSE
+IQVIA,IQV,NYSE
+TKO Group Holdings,TKO,NYSE
+Fair Isaac,FICO,NYSE
+Vulcan Materials Company,VMC,NYSE
+Garmin,GRMN,NYSE
+Kroger,KR,NYSE
+Estée Lauder Companies,EL,NYSE
+Martin Marietta Materials,MLM,NYSE
+Crown Castle,CCI,NYSE
+Nucor,NUE,NYSE
+Dominion Energy,D,NYSE
+Berkshire Hathaway,BRK-A,NYSE
+Wabtec,WAB,NYSE
+Hershey Company,HSY,NYSE
+Ventas,VTR,NYSE
+Keysight Technologies,KEYS,NYSE
+ResMed,RMD,NYSE
+Schlumberger,SLB,NYSE
+Chevron Corporation,CVX,NYSE
+PPL Corporation,PPL,NYSE
+Sysco,SYY,NYSE
+Otis Worldwide,OTIS,NYSE
+Kinder Morgan,KMI,NYSE
+EQT Corporation,EQT,NYSE
+Xylem Inc.,XYL,NYSE
+Live Nation Entertainment,LYV,NYSE
+Humana,HUM,NYSE
+Ingersoll Rand,IR,NYSE
+Hewlett Packard Enterprise,HPE,NYSE
+Arthur J. Gallagher & Co.,AJG,NYSE
+Aflac,AFL,NYSE
+Entergy,ETR,NYSE
+Dollar General,DG,NYSE
+Vici Properties,VICI,NYSE
+Mettler Toledo,MTD,NYSE
+Emcor,EME,NYSE
+Archer Daniels Midland,ADM,NYSE
+"Rollins, Inc.",ROL,NYSE
+Extra Space Storage,EXR,NYSE
+Dover Corporation,DOV,NYSE
+NiSource,NI,NYSE
+Williams Companies,WMB,NYSE
+Equifax,EFX,NYSE
+FirstEnergy,FE,NYSE
+American International Group,AIG,NYSE
+Hartford,HIG,NYSE
+Lennar,LEN,NYSE
+"Tapestry, Inc.",TPR,NYSE
+Devon Energy,DVN,NYSE
+Broadridge Financial Solutions,BR,NYSE
+Loews Corporation,L,NYSE
+Public Service Enterprise Group,PEG,NYSE
+AvalonBay Communities,AVB,NYSE
+Steris,STE,NYSE
+Leidos,LDOS,NYSE
+M&T Bank,MTB,NYSE
+CenterPoint Energy,CNP,NYSE
+Constellation Brands,STZ,NYSE
+Hubbell Incorporated,HUBB,NYSE
+Iron Mountain,IRM,NYSE
+Omnicom Group,OMC,NYSE
+Teledyne Technologies,TDY,NYSE
+Jabil,JBL,NYSE
+General Mills,GIS,NYSE
+PPG Industries,PPG,NYSE
+Waters Corporation,WAT,NYSE
+PulteGroup,PHM,NYSE
+WEC Energy Group,WEC,NYSE
+Ameren,AEE,NYSE
+Assurant,AIZ,NYSE
+Equity Residential,EQR,NYSE
+"Williams-Sonoma, Inc.",WSM,NYSE
+Pinnacle West Capital,PNW,NYSE
+Brookfield Infrastructure Partners L.P.,BIP,NYSE
+Darden Restaurants,DRI,NYSE
+Centene Corporation,CNC,NYSE
+Southwest Airlines,LUV,NYSE
+Ralph Lauren Corporation,RL,NYSE
+International Paper,IP,NYSE
+Travelers Companies,TRV,NYSE
+GFL Environmental Inc.,GFL,NYSE
+Labcorp,LH,NYSE
+"NVR, Inc.",NVR,NYSE
+Church & Dwight,CHD,NYSE
+Tyson Foods,TSN,NYSE
+West Pharmaceutical Services,WST,NYSE
+Chubb Limited,CB,NYSE
+HP Inc.,HPQ,NYSE
+Duke Energy,DUK,NYSE
+"RB Global, Inc.",RBA,NYSE
+Quest Diagnostics,DGX,NYSE
+DTE Energy,DTE,NYSE
+Packaging Corporation of America,PKG,NYSE
+Tyler Technologies,TYL,NYSE
+Snap-on,SNA,NYSE
+Zimmer Biomet,ZBH,NYSE
+CMS Energy,CMS,NYSE
+Bunge Global,BG,NYSE
+Dow Inc.,DOW,NYSE
+Lennox International,LII,NYSE
+McCormick & Company,MKC,NYSE
+DuPont,DD,NYSE
+Weyerhaeuser,WY,NYSE
+Aptiv,APTV,NYSE
+Gartner,IT,NYSE
+Albemarle Corporation,ALB,NYSE
+Genuine Parts Company,GPC,NYSE
+International Flavors & Fragrances,IFF,NYSE
+Fortive,FTV,NYSE
+Invitation Homes,INVH,NYSE
+Pentair,PNR,NYSE
+Globe Life,GL,NYSE
+Jacobs Solutions,J,NYSE
+Essex Property Trust,ESS,NYSE
+Mid-America Apartment Communities,MAA,NYSE
+GoDaddy,GDDY,NYSE
+Deckers Brands,DECK,NYSE
+Textron,TXT,NYSE
+Cencora,COR,NYSE
+EOG Resources,EOG,NYSE
+Best Buy,BBY,NYSE
+LyondellBasell,LYB,NYSE
+Ball Corporation,BALL,NYSE
+Amcor,AMCR,NYSE
+Southern Company,SO,NYSE
+Huntington Ingalls Industries,HII,NYSE
+Avery Dennison,AVY,NYSE
+Allegion,ALLE,NYSE
+Universal Health Services,UHS,NYSE
+Kimco Realty,KIM,NYSE
+IDEX Corporation,IEX,NYSE
+Masco,MAS,NYSE
+Hormel Foods,HRL,NYSE
+CF Industries,CF,NYSE
+TFI International Inc.,TFII,NYSE
+Clorox,CLX,NYSE
+Builders FirstSource,BLDR,NYSE
+Brown-Forman,BF-B,NYSE
+Stanley Black & Decker,SWK,NYSE
+"UDR, Inc.",UDR,NYSE
+Camden Property Trust,CPT,NYSE
+EPAM Systems,EPAM,NYSE
+Healthpeak Properties,DOC,NYSE
+Revvity,RVTY,NYSE
+"BXP, Inc.",BXP,NYSE
+Consolidated Edison,ED,NYSE
+Norwegian Cruise Line Holdings,NCLH,NYSE
+Charles River Laboratories,CRL,NYSE
+Baxter International,BAX,NYSE
+J.M. Smucker Company,SJM,NYSE
+MGM Resorts,MGM,NYSE
+A. O. Smith,AOS,NYSE
+Molina Healthcare,MOH,NYSE
+"W, R, Berkley Corporation",WRB,NYSE
+Occidental Petroleum,OXY,NYSE
+Generac,GNRC,NYSE
+Molson Coors Beverage Company,TAP,NYSE
+PG&E Corporation,PCG,NYSE
+Federal Realty Investment Trust,FRT,NYSE
+Alexandria Real Estate Equities,ARE,NYSE
+Paycom,PAYC,NYSE
+Conagra Brands,CAG,NYSE
+DaVita,DVA,NYSE
+Everest Group,EG,NYSE
+Mosaic Company,MOS,NYSE
+ExxonMobil,XOM,NYSE
+Eastman Chemical Company,EMN,NYSE
+Mohawk Industries,MHK,NYSE
+Brookfield Business Partners L.P.,BBU,NYSE
+Lamb Weston,LW,NYSE
+CarMax,KMX,NYSE
+Progressive Corporation,PGR,NYSE
+ConocoPhillips,COP,NYSE
+BlackBerry Limited,BB,NYSE
+Walmart,WMT,NYSE
+Allstate,ALL,NYSE
+Barrick Mining Corporation,B,NYSE
+Coterra,CTRA,NYSE
+G Mining Ventures Corp.,GMIN.TO,TSE
+South Bow Corporation,SOBO,TSE
+Lundin Mining Corporation,LUN.TO,TSE
+Allied Properties Real Estate Investment Trust,AP-UN.TO,TSE
+Boardwalk Real Estate Investment Trust,BEI-UN.TO,TSE
+Canadian Apartment Properties Real Estate Investment Trust,CAR-UN.TO,TSE
+Choice Properties Real Estate Investment Trust,CHP-UN.TO,TSE
+Crombie Real Estate Investment Trust,CRR-UN.TO,TSE
+CT Real Estate Investment Trust,CRT-UN.TO,TSE
+Dream Industrial Real Estate Investment Trust,DIR-UN.TO,TSE
+First Capital Real Estate Investment Trust,FCR-UN.TO,TSE
+First Majestic Silver Corp.,AG,TSE
+Granite Real Estate Investment Trust,GRTUF,TSE
+H&R Real Estate Investment Trust,HR-UN.TO,TSE
+InterRent Real Estate Investment Trust,IIP-UN.TO,TSE
+Killam Apartment Real Estate Investment Trust,KMP-UN.TO,TSE
+Northwest Healthcare Properties Real Estate Investment Trust,NWH-UN.TO,TSE
+Primaris Real Estate Investment Trust,PMZ-UN.TO,TSE
+Riocan Real Estate Investment Trust,REI-UN.TO,TSE
+SmartCentres Real Estate Investment Trust,SRU-UN.TO,TSE
+Teck Resources Limited,TECK,TSE
+goeasy Ltd.,GSY.TO,TSE
+EQB Inc.,EQB.TO,TSE
+Canadian Pacific Kansas City Limited,CP,TSE
+ONEX Corporation,ONEX.TO,TSE
+Loblaw Companies Limited,L.TO,TSE
+Alimentation Couche-Tard Inc.,ATD.TO,TSE
+Laurentian Bank of Canada,LB.TO,TSE
+Constellation Software Inc.,CSU.TO,TSE
+Canadian National Railway Company,CNI,TSE
+Bank of Nova Scotia,BNS,TSE
+Thomson Reuters Corporation,TRI,TSE
+Franco-Nevada Corporation,FNV,TSE
+IGM Financial Inc.,IGM.TO,TSE
+Wheaton Precious Metals Corp.,WPM,TSE
+Dollarama Inc.,DOL.TO,TSE
+NFI Group Inc.,NFI.TO,TSE
+Canadian Imperial Bank of Commerce,CM,TSE
+Sprott Inc.,SII,TSE
+Trisura Group Ltd.,TSU.TO,TSE
+Cameco Corporation,CCJ,TSE
+Nutrien Ltd.,NTR,TSE
+Advantage Energy Ltd.,AAV.TO,TSE
+Bank of Montreal,BMO,TSE
+George Weston Limited,WN.TO,TSE
+National Bank of Canada,NA.TO,TSE
+Kinross Gold Corporation,KGC,TSE
+WSP Global Inc.,WSP.TO,TSE
+Celestica Inc.,CLS,TSE
+International Petroleum Corporation,IPCO.TO,TSE
+First Quantum Minerals Ltd.,FM.TO,TSE
+Exchange Income Corporation,EIF.TO,TSE
+Headwater Exploration Inc.,HWX.TO,TSE
+Power Corporation of Canada,POW.TO,TSE
+Sun Life Financial Inc.,SLF,TSE
+Lundin Gold Inc.,LUG.TO,TSE
+PrairieSky Royalty Ltd.,PSK.TO,TSE
+Manulife Financial Corporation,MFC,TSE
+Bombardier Inc.,BBD-B.TO,TSE
+Ivanhoe Mines Ltd.,IVN.TO,TSE
+Royal Bank of Canada,RY,TSE
+Tamarack Valley Energy Ltd.,TVE.TO,TSE
+Alamos Gold Inc.,AGI,TSE
+Pan American Silver Corp.,PAAS,TSE
+BCE Inc.,BCE,TSE
+Restaurant Brands International Inc.,QSR,TSE
+Keyera Corp.,KEY.TO,TSE
+Algonquin Power & Utilities Corp.,AQN,TSE
+Metro Inc.,MRU.TO,TSE
+Rogers Communications,RCI,TSE
+Northland Power Inc.,NPI.TO,TSE
+TELUS Corporation,TU,TSE
+TransAlta Corporation,TAC,TSE
+CGI Inc.,GIB,TSE
+IA Financial Corporation,IAG.TO,TSE
+Saputo Inc.,SAP.TO,TSE
+Magna International Inc.,MGA,TSE
+AtkinsRealis Group Inc.,ATRL.TO,TSE
+CCL Industries Inc.,CCL-B.TO,TSE
+Vermilion Energy Inc.,VET,TSE
+Superior Plus Corp.,SPB.TO,TSE
+Toronto-Dominion Bank,TD,TSE
+Element Fleet Management Corp.,EFN.TO,TSE
+TC Energy Corporation,TRP,TSE
+Toromont Industries Ltd.,TIH.TO,TSE
+Aritzia Inc.,ATZ.TO,TSE
+Enbridge Inc.,ENB,TSE
+Imperial Oil Limited,IMO,TSE
+Freehold Royalties Ltd.,FRU.TO,TSE
+Gildan Activewear Inc.,GIL,TSE
+HudBay Minerals Inc.,HBM,TSE
+Equinox Gold Corp.,EQX,TSE
+Pembina Pipeline Corporation,PBA,TSE
+Capstone Copper Corp.,CS.TO,TSE
+Stantec Inc.,STN,TSE
+Empire Company Limited,EMP-A.TO,TSE
+Canadian Natural Resources Limited,CNQ,TSE
+Canadian Utilities Limited,CU.TO,TSE
+CAE Inc.,CAE,TSE
+Finning International Inc.,FTT.TO,TSE
+Dundee Precious Metals,DPM.TO,TSE
+IAMGold Corporation,IAG,TSE
+Triple Flag Precious Metals Corp.,TFPM,TSE
+Canadian Tire Corporation Limited,CTC-A.TO,TSE
+OceanaGold Corporation,OGC.TO,TSE
+OR Royalties Inc.,OR,TSE
+NexGen Energy Ltd.,NXE,TSE
+Quebecor Inc.,QBR-B.TO,TSE
+B2Gold Corp.,BTG,TSE
+Eldorado Gold Corporation,EGO,TSE
+BRP Inc.,DOO,TSE
+Descartes Systems Group Inc.,DSGX,TSE
+New Gold Inc.,NGD,TSE
+West Fraser Timber Co. Ltd.,WFG,TSE
+Orla Mining Ltd.,ORLA,TSE
+Fairfax Financial Holdings Limited,FFH.TO,TSE
+Torex Gold Resources Inc.,TXG.TO,TSE
+Kelt Exploration Ltd.,KEL.TO,TSE
+Boyd Group Services Inc.,BGSI,TSE
+Energy Fuels Inc.,UUUU,TSE
+Air Canada,AC.TO,TSE
+NGEx Minerals Ltd.,NGEX.TO,TSE
+K92 Mining Inc.,KNT.TO,TSE
+Linamar Corporation,LNR.TO,TSE
+Stella-Jones Inc.,SJ.TO,TSE
+Great-West Lifeco Inc.,GWO.TO,TSE
+Capital Power Corporation,CPX.TO,TSE
+Kinaxis Inc.,KXS.TO,TSE
+Whitecap Resources,WCP.TO,TSE
+SSR Mining Inc.,SSRM,TSE
+Ero Copper Corp.,ERO,TSE
+Fortuna Mining Corp.,FSM,TSE
+Emera Incorporated,EMA,TSE
+Gibson Energy Inc.,GEI.TO,TSE
+Centerra Gold Inc.,CGAU,TSE
+Denison Mines Corp.,DNN,TSE
+Novagold Resources Inc.,NG,TSE
+ATS Corporation,ATS,TSE
+Paramount Resources Ltd.,POU.TO,TSE
+Parex Resources Inc.,PXT.TO,TSE
+Fortis Inc.,FTS,TSE
+Secure Waste Infrastructure Corp.,SES.TO,TSE
+TerraVest Industries Inc.,TVK.TO,TSE
+MDA Space Ltd.,MDA.TO,TSE
+Cenovus Energy Inc.,CVE,TSE
+Wesdome Gold Mines Ltd.,WDO.TO,TSE
+Methanex Corporation,MEOH,TSE
+Premium Brands Holdings Corporation,PBH.TO,TSE
+Seabridge Gold Inc.,SA,TSE
+Atco Ltd.,ACO-X.TO,TSE
+Maple Leaf Foods Inc.,MFI.TO,TSE
+Endeavour Silver Corp.,EXK,TSE
+Cogeco Communications Inc.,CCA.TO,TSE
+Aya Gold & Silver Inc.,AYA.TO,TSE
+Bausch Health Companies Inc.,BHC,TSE
+Topaz Energy Corp.,TPZ.TO,TSE
+Enerflex Ltd.,EFXT,TSE
+CES Energy Solutions Corp.,CEU.TO,TSE
+Badger Infrastructure Solutions Ltd.,BDGI.TO,TSE
+Russell Metals Inc.,RUS.TO,TSE
+Altus Group Limited,AIF.TO,TSE
+AltaGas Ltd.,ALA.TO,TSE
+North West Company Inc.,NWC.TO,TSE
+Lightspeed Commerce Inc.,LSPD,TSE
+Richelieu Hardware Ltd.,RCH.TO,TSE
+Hydro One Limited,H.TO,TSE
+Suncor Energy Inc.,SU,TSE
+Aecon Group Inc.,ARE.TO,TSE
+Birchcliff Energy Ltd.,BIR.TO,TSE
+Sienna Senior Living Inc.,SIA.TO,TSE
+Boralex Inc.,BLX.TO,TSE
+Labrador Iron Ore Royalty Corporation,LIF.TO,TSE
+Athabasca Oil Corporation,ATH.TO,TSE
+Transcontinental Inc.,TCL-B.TO,TSE
+Pet Value Holdings Ltd.,PET.TO,TSE
+TMX Group Limited,X.TO,TSE
+Peyto Exploration & Development Corp.,PEY.TO,TSE
+Baytex Energy,BTE,TSE
+Intact Financial Corporation,IFC.TO,TSE
+Bird Construction Inc.,BDT.TO,TSE
+Tourmaline Oil Corp.,TOU.TO,TSE
+Mullen Group Ltd.,MTL.TO,TSE
+Definity Financial Corporation,DFY.TO,TSE
+ARC Resources Ltd.,ARX.TO,TSE
+Jamieson Wellness Inc.,JWEL.TO,TSE
+Winpak Ltd.,WPK.TO,TSE
+Cargojet Inc.,CJT.TO,TSE
+Enghouse Systems Limited,ENGH.TO,TSE
+Pason Systems Inc.,PSI.TO,TSE
