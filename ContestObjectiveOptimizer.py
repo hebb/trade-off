@@ -4,10 +4,10 @@ ContestObjectiveOptimizer.py
 
 Integrated contest optimiser with selectable objective:
 
-  --objective te   : choose ahebb portfolio by minimising tracking error (TE) to benchmark
-  --objective win  : choose ahebb portfolio by maximising P(ahebb finishes 1st)
+  --objective te   : choose anchor portfolio by minimising tracking error (TE) to benchmark
+  --objective win  : choose anchor portfolio by maximising P(anchor finishes 1st)
 
-Shared contest constraints for ahebb:
+Shared contest constraints for anchor:
   - at least 5 stocks
   - each stock weight between 5% and 25%
   - 1% increments
@@ -33,7 +33,7 @@ Notes:
   - TE uses the same improved greedy/local-search optimiser you had, but now enforces CASH cap.
   - WIN uses a cheap inner Monte Carlo objective with common random numbers:
         R_T ~ N(T*mu_day, T*Sigma_day)
-    Opponents’ terminal log-values are precomputed; each candidate only computes ahebb logV and
+    Opponents’ terminal log-values are precomputed; each candidate only computes anchor logV and
     compares to the per-sim opponent max.
 """
 
@@ -58,6 +58,47 @@ def norm_ticker(t: str) -> str:
     t = t.replace(":CA", "")
     t = t.replace(".TO", "")
     return t
+
+
+def canonical_ticker(t: str, symbol_alias_map: Optional[Dict[str, str]] = None) -> str:
+    t_norm = norm_ticker(t)
+    if symbol_alias_map is None:
+        return t_norm
+    return symbol_alias_map.get(t_norm, t_norm)
+
+
+def load_symbol_alias_map(path: str = "StockList.csv") -> Dict[str, str]:
+    """
+    Return a mapping from leaderboard symbols to canonical symbols.
+
+    StockList.csv should contain a Symbol column and may contain an
+    Alternative Symbol column. When Alternative Symbol is filled in, a
+    holding using that alternative ticker is mapped back to Symbol.
+    """
+    if not path or not os.path.exists(path):
+        return {}
+
+    stocklist = pd.read_csv(path)
+    if "Symbol" not in stocklist.columns:
+        return {}
+
+    alias_map: Dict[str, str] = {}
+
+    for _, row in stocklist.iterrows():
+        sym_raw = row.get("Symbol", "")
+        if pd.isna(sym_raw) or not str(sym_raw).strip():
+            continue
+
+        canonical = norm_ticker(sym_raw)
+        alias_map[canonical] = canonical
+
+        if "Alternative Symbol" in stocklist.columns:
+            alt_raw = row.get("Alternative Symbol", "")
+            if pd.notna(alt_raw) and str(alt_raw).strip():
+                alt = norm_ticker(alt_raw)
+                alias_map[alt] = canonical
+
+    return alias_map
 
 
 def parse_pct(x) -> float:
@@ -127,39 +168,26 @@ def combine_monthly_daily_corr(corr_monthly: pd.DataFrame, corr_daily: pd.DataFr
     cm = corr_monthly.copy(deep=True)
     cd = corr_daily.copy(deep=True)
 
-    cm.index = [norm_ticker(x) for x in cm.index]
-    cm.columns = [norm_ticker(x) for x in cm.columns]
-    cd.index = [norm_ticker(x) for x in cd.index]
-    cd.columns = [norm_ticker(x) for x in cd.columns]
+    # Duplicate or non-square labels can make the old length-based check fail
+    # with a misleading "Missing: []" message.
+    cm = cm.loc[~cm.index.duplicated(keep="first"), ~cm.columns.duplicated(keep="first")]
+    cd = cd.loc[~cd.index.duplicated(keep="first"), ~cd.columns.duplicated(keep="first")]
 
-    # Drop accidental blank / unnamed labels
-    bad = {"", "nan", "None", "Unnamed: 0"}
-    cm = cm.loc[
-        [x for x in cm.index if str(x) not in bad],
-        [x for x in cm.columns if str(x) not in bad],
-    ]
-    cd = cd.loc[
-        [x for x in cd.index if str(x) not in bad],
-        [x for x in cd.columns if str(x) not in bad],
-    ]
+    daily_tickers = set(cd.index).union(set(cd.columns))
+    monthly_tickers = set(cm.index).intersection(set(cm.columns))
 
-    # Remove duplicate labels, keeping the first occurrence
-    cm = cm.loc[~cm.index.duplicated(), ~cm.columns.duplicated()]
-    cd = cd.loc[~cd.index.duplicated(), ~cd.columns.duplicated()]
-
-    common = cm.index.intersection(cm.columns).intersection(cd.index).intersection(cd.columns)
-
-    missing_rows = sorted(set(cd.index) - set(cm.index))
-    missing_cols = sorted(set(cd.columns) - set(cm.columns))
-    if missing_rows or missing_cols:
+    missing = sorted(daily_tickers - monthly_tickers)
+    if missing:
         raise ValueError(
             "Daily matrix tickers not fully contained in monthly matrix. "
-            f"Missing rows: {missing_rows}; Missing columns: {missing_cols}"
+            f"Missing: {missing}"
         )
 
+    common = sorted(set(cm.index).intersection(cm.columns).intersection(cd.index).intersection(cd.columns))
     cm.loc[common, common] = cd.loc[common, common]
 
     cm = cm.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    cm = cm.reindex(index=cm.index, columns=cm.index, fill_value=0.0)
     cm = (cm + cm.T) / 2.0
 
     for i in range(len(cm)):
@@ -168,13 +196,49 @@ def combine_monthly_daily_corr(corr_monthly: pd.DataFrame, corr_daily: pd.DataFr
     return cm
 
 
-def load_vols(path: str) -> Dict[str, float]:
+def load_vols(path: str, symbol_alias_map: Optional[Dict[str, str]] = None) -> Dict[str, float]:
     vols = pd.read_csv(path)
-    if "Ticker" not in vols.columns or "Implied Volatility" not in vols.columns:
-        raise ValueError(f"Vol file {path} missing expected columns Ticker / Implied Volatility")
-    vols["Ticker_norm"] = vols["Ticker"].apply(norm_ticker)
-    vols["vol"] = vols["Implied Volatility"].apply(parse_pct)
-    return dict(zip(vols["Ticker_norm"], vols["vol"]))
+
+    ticker_col = None
+    for candidate in ["Ticker", "Symbol", "Underlying"]:
+        if candidate in vols.columns:
+            ticker_col = candidate
+            break
+
+    if ticker_col is None or "Implied Volatility" not in vols.columns:
+        raise ValueError(
+            f"Vol file {path} missing expected columns. "
+            "Expected Implied Volatility and one of Ticker / Symbol / Underlying. "
+            f"Found: {list(vols.columns)}"
+        )
+
+    out: Dict[str, float] = {}
+
+    for _, row in vols.iterrows():
+        raw = row.get(ticker_col, "")
+        iv_raw = row.get("Implied Volatility", "")
+
+        if pd.isna(raw) or not str(raw).strip():
+            continue
+        if pd.isna(iv_raw) or not str(iv_raw).strip():
+            continue
+
+        try:
+            vol = parse_pct(iv_raw)
+        except Exception:
+            continue
+
+        # Store both forms.  This avoids missing TCL-B when the volatility
+        # file contains TCL-B.TO, and also allows the StockList.csv alias map
+        # to work if the vol file uses either the contest ticker or the
+        # canonical ticker.
+        t_norm = norm_ticker(raw)
+        out[t_norm] = vol
+
+        t_canon = canonical_ticker(raw, symbol_alias_map)
+        out[t_canon] = vol
+
+    return out
 
 
 def load_leaderboard(path: str) -> pd.DataFrame:
@@ -193,8 +257,11 @@ def load_leaderboard(path: str) -> pd.DataFrame:
 # Portfolios
 # -----------------------------
 
-def parse_portfolio_from_row(row: pd.Series) -> Dict[str, float]:
-    holdings = [norm_ticker(x) for x in str(row["Holdings"]).split(",") if str(x).strip()]
+def parse_portfolio_from_row(
+    row: pd.Series,
+    symbol_alias_map: Optional[Dict[str, str]] = None,
+) -> Dict[str, float]:
+    holdings = [canonical_ticker(x, symbol_alias_map) for x in str(row["Holdings"]).split(",") if str(x).strip()]
     w_list = parse_weights_string(row.get("Weights", ""))
 
     if (w_list is None) or (len(w_list) != len(holdings)):
@@ -220,7 +287,8 @@ def parse_portfolio_from_row(row: pd.Series) -> Dict[str, float]:
 
 def build_player_portfolios(
     lb: pd.DataFrame,
-    drop_duplicates: bool = True
+    drop_duplicates: bool = True,
+    symbol_alias_map: Optional[Dict[str, str]] = None,
 ) -> Tuple[List[str], Dict[str, float], Dict[str, Dict[str, float]]]:
     ports: Dict[str, Dict[str, float]] = {}
     values: Dict[str, float] = {}
@@ -228,7 +296,7 @@ def build_player_portfolios(
     for _, row in lb.iterrows():
         name = str(row["Name"])
         values[name] = float(row["Value"])
-        ports[name] = parse_portfolio_from_row(row)
+        ports[name] = parse_portfolio_from_row(row, symbol_alias_map=symbol_alias_map)
 
     if not drop_duplicates:
         return list(ports.keys()), values, ports
@@ -288,7 +356,9 @@ def ensure_corr_and_vol_coverage(
             vol_vec[i] = 0.0
         else:
             if t not in vol_dict:
-                raise ValueError(f"Missing volatility for ticker '{t}'. Add it to your vol file(s).")
+                close = sorted([k for k in vol_dict.keys() if str(k).replace(".", "-") == str(t).replace(".", "-")])
+                extra = f" Close normalized matches: {close}" if close else ""
+                raise ValueError(f"Missing volatility for ticker '{t}'. Add it to your vol file(s).{extra}")
             vol_vec[i] = float(vol_dict[t])
 
     C = corr_u.to_numpy(dtype=float, copy=True)
@@ -399,7 +469,7 @@ def is_legal_portfolio(port: Dict[str, float], constraints: ContestConstraints) 
 
 
 # -----------------------------
-# TE-min portfolio for ahebb (with CASH cap)
+# TE-min portfolio for anchor (with CASH cap)
 # -----------------------------
 
 def greedy_te_min_portfolio(
@@ -803,7 +873,7 @@ def load_or_compute_win_probs_excl_ahebb(
         probs = {p: probs[p] for p in players_ex if p in probs}
         s = sum(probs.values())
         if s <= 0:
-            raise ValueError(f"{winprob_path} sums to <= 0 over non-ahebb players.")
+            raise ValueError(f"{winprob_path} sums to <= 0 over non-anchor players.")
         return {p: w / s for p, w in probs.items()}
 
     finish_ex = simulate_finish_probs(
@@ -841,7 +911,7 @@ def make_mc_objective_context(
     days_remaining: int,
     inner_sims: int,
     seed: int,
-    anchor: str = "AndrewHebb",
+    anchor: str = "ahebb",
 ) -> MonteCarloObjectiveContext:
     if anchor not in players:
         raise ValueError(f"Anchor '{anchor}' not found in Leaderboard.csv")
@@ -875,9 +945,9 @@ def make_mc_objective_context(
     return MonteCarloObjectiveContext(r_T=r_T, max_logV_other=max_logV_other, logV0_a=logV0_a)
 
 
-def mc_win_prob_first(w_a: np.ndarray, ctx: MonteCarloObjectiveContext) -> Tuple[float, float]:
-    logV_a = ctx.logV0_a + (ctx.r_T @ w_a)
-    wins = (logV_a > ctx.max_logV_other)
+def mc_win_prob_first(w_anchor: np.ndarray, ctx: MonteCarloObjectiveContext) -> Tuple[float, float]:
+    logV_anchor = ctx.logV0_a + (ctx.r_T @ w_anchor)
+    wins = (logV_anchor > ctx.max_logV_other)
     p_hat = float(np.mean(wins))
     obj = float(math.log(p_hat + 1e-12))
     return obj, p_hat
@@ -1151,9 +1221,23 @@ def run_all(
     samples: int,
     exclude_tickers: str,
     max_cash: int,
+    anchor_name: str,
+    stocklist_csv: str,
 ) -> None:
+    symbol_alias_map = load_symbol_alias_map(stocklist_csv)
+    if symbol_alias_map:
+        n_aliases = sum(1 for k, v in symbol_alias_map.items() if k != v)
+        print(f"Loaded {n_aliases} alternative-symbol mapping(s) from {stocklist_csv}")
+
     lb = load_leaderboard(leaderboard_csv)
-    players, values, ports = build_player_portfolios(lb, drop_duplicates=True)
+    players, values, ports = build_player_portfolios(
+        lb,
+        drop_duplicates=True,
+        symbol_alias_map=symbol_alias_map,
+    )
+
+    if anchor_name not in players:
+        raise ValueError(f"Anchor {anchor_name!r} not found in Leaderboard.csv")
 
     corr_m = load_corr_matrix(corr_monthly_csv)
     corr_d = load_corr_matrix(corr_daily_csv)
@@ -1161,15 +1245,15 @@ def run_all(
 
     ports = {p: filter_portfolio_to_corr(ports[p], corr_combined) for p in players}
 
-    vol_short = load_vols(vol_short_csv)
-    vol_med = load_vols(vol_medium_csv)
+    vol_short = load_vols(vol_short_csv, symbol_alias_map=symbol_alias_map)
+    vol_med = load_vols(vol_medium_csv, symbol_alias_map=symbol_alias_map)
 
     vols_wp = vol_short if wp_vol_source == "short" else vol_med
     vols_te = vol_short if te_vol_source == "short" else vol_med
     vols_opt = vol_short if opt_vol_source == "short" else vol_med
     vols_sim = vol_short if sim_vol_source == "short" else vol_med
 
-    raw_excludes = [norm_ticker(x) for x in exclude_tickers.split(",") if x.strip()]
+    raw_excludes = [canonical_ticker(x, symbol_alias_map) for x in exclude_tickers.split(",") if x.strip()]
     exclude_set = set(raw_excludes)
     if exclude_set:
         print(f"Excluding tickers from optimisation: {sorted(exclude_set)}")
@@ -1183,8 +1267,8 @@ def run_all(
         max_cash=max_cash,
     )
 
-    # --- Benchmark win probs: ahebb excluded entirely ---
-    players_ex = [p for p in players if p != "ahebb"]
+    # --- Benchmark win probs: anchor excluded entirely ---
+    players_ex = [p for p in players if p != anchor_name]
     values_ex = {p: values[p] for p in players_ex}
 
     universe_ex = make_universe(players_ex, ports)
@@ -1222,36 +1306,33 @@ def run_all(
       .to_csv("weighted_benchmark.csv", index=False)
     print("Wrote: weighted_benchmark.csv")
 
-    # --- Universe for ahebb optimisation ---
+    # --- Universe for anchor optimisation ---
     universe0 = make_universe(players, ports)
-    tickers_for_ahebb = [t for t in universe0 if t != "CASH" and t not in exclude_set]
+    tickers_for_anchor = [t for t in universe0 if t != "CASH" and t not in exclude_set]
 
-    if len(tickers_for_ahebb) < constraints.min_stocks:
+    if len(tickers_for_anchor) < constraints.min_stocks:
         raise ValueError("After exclusions, fewer than min_stocks tickers remain in the universe.")
 
-    # --- Choose ahebb portfolio ---
+    # --- Choose anchor portfolio ---
     if objective == "current":
-        if "ahebb" not in ports:
-            raise ValueError("ahebb not found in Leaderboard.csv")
-
         # ports[...] has already been processed the same way as every other player:
         # parsed, unknown tickers dropped to CASH, renormalised, and filtered to the correlation universe.
-        ahebb_port = ports["ahebb"]
+        anchor_port = ports[anchor_name]
 
-        print("\nUsing current ahebb portfolio from Leaderboard.csv (no optimisation):")
+        print(f"\nUsing current {anchor_name} portfolio from Leaderboard.csv (no optimisation):")
 
     elif objective == "te":
         corr_u_te, vol_vec_te = ensure_corr_and_vol_coverage(universe0, corr_combined, vols_te)
-        ahebb_port = greedy_te_min_portfolio(bench, corr_u_te, vol_vec_te, constraints, exclude_set=exclude_set)
+        anchor_port = greedy_te_min_portfolio(bench, corr_u_te, vol_vec_te, constraints, exclude_set=exclude_set)
 
-        te_vs_bench_te = tracking_error_portfolios(ahebb_port, bench, corr_u_te, vol_vec_te)
-        print(f"\nTE(selected ahebb, benchmark) {te_vol_source.upper()}-TERM vols (ann.): {te_vs_bench_te:.6f}")
+        te_vs_bench_te = tracking_error_portfolios(anchor_port, bench, corr_u_te, vol_vec_te)
+        print(f"\nTE(selected {anchor_name}, benchmark) {te_vol_source.upper()}-TERM vols (ann.): {te_vs_bench_te:.6f}")
 
         corr_u_med0, vol_vec_med0 = ensure_corr_and_vol_coverage(universe0, corr_combined, vol_med)
-        te_vs_bench_med = tracking_error_portfolios(ahebb_port, bench, corr_u_med0, vol_vec_med0)
-        print(f"TE(selected ahebb, benchmark) MEDIUM-TERM vols (ann.): {te_vs_bench_med:.6f}")
+        te_vs_bench_med = tracking_error_portfolios(anchor_port, bench, corr_u_med0, vol_vec_med0)
+        print(f"TE(selected {anchor_name}, benchmark) MEDIUM-TERM vols (ann.): {te_vs_bench_med:.6f}")
 
-        print("\nTracking-error-minimizing portfolio for ahebb (contest-legal, cash capped):")
+        print(f"\nTracking-error-minimizing portfolio for {anchor_name} (contest-legal, cash capped):")
 
     elif objective == "win":
         corr_u_opt, vol_vec_opt = ensure_corr_and_vol_coverage(universe0, corr_combined, vols_opt)
@@ -1267,15 +1348,15 @@ def run_all(
             days_remaining=days_remaining,
             inner_sims=inner_sims,
             seed=seed,
-            anchor="ahebb",
+            anchor=anchor_name,
         )
 
         print(f"\nOptimising for win probability using {opt_vol_source.upper()}-TERM vols (inner MC objective, S={inner_sims}).")
         rng = np.random.default_rng(seed)
 
-        ahebb_port = optimise_for_win_probability(
+        anchor_port = optimise_for_win_probability(
             rng=rng,
-            tickers=tickers_for_ahebb,
+            tickers=tickers_for_anchor,
             bench=bench,
             constraints=constraints,
             u_index=u_index_full,
@@ -1286,20 +1367,20 @@ def run_all(
             polish_steps=600,
         )
 
-        print("\nWin-probability-optimised portfolio for ahebb (contest-legal, cash capped):")
+        print(f"\nWin-probability-optimised portfolio for {anchor_name} (contest-legal, cash capped):")
 
     else:
         raise ValueError("--objective must be 'te', 'win', or 'current'.")
 
-    if not is_legal_portfolio(ahebb_port, constraints):
-        raise RuntimeError("Internal error: chosen ahebb portfolio violates constraints (including CASH cap).")
+    if not is_legal_portfolio(anchor_port, constraints):
+        raise RuntimeError(f"Internal error: chosen {anchor_name} portfolio violates constraints (including CASH cap).")
 
-    for t, wt in sorted(ahebb_port.items(), key=lambda x: x[1], reverse=True):
+    for t, wt in sorted(anchor_port.items(), key=lambda x: x[1], reverse=True):
         print(f"  {t:6s}  {wt*100:6.2f}%")
 
-    # --- Final full contest sim including chosen ahebb using sim vols ---
+    # --- Final full contest sim including chosen anchor using sim vols ---
     ports_adj = dict(ports)
-    ports_adj["ahebb"] = ahebb_port
+    ports_adj[anchor_name] = anchor_port
 
     universe_full = make_universe(players, ports_adj)
     corr_u_sim, vol_vec_sim = ensure_corr_and_vol_coverage(universe_full, corr_combined, vols_sim)
@@ -1314,9 +1395,9 @@ def run_all(
         days_remaining, n_sims=n_sims, seed=seed, return_counts=True
     )
 
-    if "ahebb" in finish_full:
-        pa = finish_full["ahebb"]
-        print("\nAHEBB finish probabilities (Monte Carlo) with ~95% MOE:")
+    if anchor_name in finish_full:
+        pa = finish_full[anchor_name]
+        print(f"\n{anchor_name} finish probabilities (Monte Carlo) with ~95% MOE:")
         for k in ["P1st", "P2nd", "P3rd", "PWorse"]:
             p_hat = float(pa[k])
             moe = moe95(p_hat, n_used)
@@ -1324,7 +1405,7 @@ def run_all(
 
     # contest_results.csv
     Sigma_ann_sim = (Sigma_ann_sim + Sigma_ann_sim.T) / 2.0
-    w_a = W_full["ahebb"]
+    w_a = W_full[anchor_name]
 
     te_to_a = {}
     ann_vol = {}
@@ -1343,7 +1424,7 @@ def run_all(
             "P2nd": finish_full[p]["P2nd"],
             "P3rd": finish_full[p]["P3rd"],
             "PWorse": finish_full[p]["PWorse"],
-            "TrackingError_to_ahebb": te_to_a[p],
+            f"TrackingError_to_{anchor_name}": te_to_a[p],
             "AnnualizedVolatility": ann_vol[p],
         })
 
@@ -1355,7 +1436,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--objective", choices=["te", "win", "current"], default="te",
-                        help="Portfolio objective: 'te' minimises tracking error; 'win' maximises P(1st); 'current' uses ahebb from Leaderboard.csv.")
+                        help="Portfolio objective: 'te' minimises tracking error; 'win' maximises P(1st); 'current' uses the anchor portfolio from Leaderboard.csv.")
+    parser.add_argument("--anchor", type=str, default="ahebb",
+                        help="Leaderboard player name to optimise/replace. Default: ahebb.")
+    parser.add_argument("--stocklist", type=str, default="StockList.csv",
+                        help="CSV containing Symbol and optional Alternative Symbol columns. Default: StockList.csv.")
 
     parser.add_argument("--days", type=int, default=None, help="Trading days remaining (e.g. 13)")
     parser.add_argument("--sims", type=int, default=400_000, help="Number of Monte Carlo simulations (final reporting)")
@@ -1364,11 +1449,11 @@ if __name__ == "__main__":
     parser.add_argument("--wp_vol_source", choices=["short", "medium"], default="medium",
                         help="Vols used when (re)computing WinProbabilities_excl_ahebb.csv (default: medium)")
     parser.add_argument("--te_vol_source", choices=["short", "medium"], default="short",
-                        help="Vols used for TE optimisation and TE(selected ahebb, benchmark) reporting (default: short)")
+                        help="Vols used for TE optimisation and TE(selected anchor, benchmark) reporting (default: short)")
     parser.add_argument("--opt_vol_source", choices=["short", "medium"], default="medium",
                         help="Vols used for WIN optimisation objective (default: medium)")
     parser.add_argument("--sim_vol_source", choices=["short", "medium"], default="medium",
-                        help="Vols used for the final full contest simulation after replacing ahebb (default: medium)")
+                        help="Vols used for the final full contest simulation after replacing anchor (default: medium)")
 
     parser.add_argument("--inner_sims", type=int, default=12000,
                         help="Inner simulations for WIN objective (only used when --objective win)")
@@ -1378,17 +1463,17 @@ if __name__ == "__main__":
                         help="Samples per round (only used when --objective win)")
 
     parser.add_argument("--exclude", type=str, default="",
-                        help="Comma-separated tickers to exclude from ahebb optimisation universe (applies to both objectives).")
+                        help="Comma-separated tickers to exclude from anchor optimisation universe (applies to both objectives).")
 
     parser.add_argument("--max_cash", type=int, default=25,
-                        help="Maximum CASH percent allowed in ahebb portfolio (default: 25).")
+                        help="Maximum CASH percent allowed in anchor portfolio (default: 25).")
 
     args = parser.parse_args()
 
     days = get_days_remaining(args.days)
 
     print(
-        f"Objective: {args.objective} | "
+        f"Objective: {args.objective} | anchor={args.anchor} | "
         f"Vol sources: win-prob={args.wp_vol_source}, TE={args.te_vol_source}, opt={args.opt_vol_source}, sim={args.sim_vol_source} | "
         f"max_cash={args.max_cash}%"
     )
@@ -1413,5 +1498,7 @@ if __name__ == "__main__":
         samples=args.samples,
         exclude_tickers=args.exclude,
         max_cash=args.max_cash,
+        anchor_name=args.anchor,
+        stocklist_csv=args.stocklist,
     )
 
