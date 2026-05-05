@@ -22,6 +22,7 @@ Key points:
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import random
@@ -49,6 +50,88 @@ ELITE_POOL_START_FRAC = 0.35
 TEMP_START_MULT = 0.08
 TEMP_END_MULT = 0.001
 EPS = 1e-15
+
+
+# -----------------------------
+# Configuration loading
+# -----------------------------
+
+DEFAULT_CONFIG = {
+    "objective": "te",
+    "anchor": "ahebb",
+    "days": None,
+    "exclude": "",
+    "forced": "",
+    "files": {
+        "leaderboard_csv": "Leaderboard.csv",
+        "stocklist_csv": "StockList.csv",
+        "corr_file": "correlation_matrix.csv",
+        "vol_short_csv": "Volatilities.csv",
+        "vol_medium_csv": "Volatilities2.csv",
+        "winprob_path": "WinProbabilities_excl_ahebb.csv",
+    },
+    "model": {
+        "wp_vol_source": "medium",
+        "opt_vol_source": "medium",
+        "sim_vol_source": "medium",
+        "max_cash": 25,
+    },
+    "win_objective": {
+        "inner_sims": 12_000,
+        "rounds": 8,
+        "samples": 450,
+    },
+    "final_simulation": {
+        "sims": 400_000,
+        "seed": 0,
+    },
+}
+
+
+def deep_update(base: dict, updates: dict) -> dict:
+    """Recursively merge updates into base and return a new dictionary."""
+    out = dict(base)
+    for key, value in (updates or {}).items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = deep_update(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def load_config_file(path: Optional[str]) -> dict:
+    """Load YAML or JSON config. Missing default config files are ignored."""
+    if not path:
+        return {}
+    if not os.path.exists(path):
+        if path == "config.yaml":
+            return {}
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    with open(path, "r", encoding="utf-8") as f:
+        if path.lower().endswith(".json"):
+            data = json.load(f)
+        else:
+            try:
+                import yaml
+            except ImportError as exc:
+                raise ImportError("Reading YAML config files requires PyYAML. Install it or use a JSON config file.") from exc
+            data = yaml.safe_load(f) or {}
+
+    if not isinstance(data, dict):
+        raise ValueError("Config file must contain a mapping at the top level.")
+    return data
+
+
+def cfg_get(cfg: dict, dotted: str, fallback=None):
+    """Read nested config values, with a fallback to a flat key of the same final name."""
+    cur = cfg
+    for part in dotted.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            flat_key = dotted.split(".")[-1]
+            return cfg.get(flat_key, fallback) if isinstance(cfg, dict) else fallback
+        cur = cur[part]
+    return cur
 
 
 # -----------------------------
@@ -1486,37 +1569,53 @@ def run_all(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Combined contest optimiser.")
-    parser.add_argument("--objective", choices=["te", "win", "vol", "current"], default="te", help="Portfolio objective.")
-    parser.add_argument("--anchor", type=str, default="ahebb", help="Leaderboard player name to optimise/replace. Default: ahebb.")
-    parser.add_argument("--stocklist", type=str, default="StockList.csv", help="CSV containing Symbol and optional Alternative Symbol columns. Default: StockList.csv.")
-    parser.add_argument("--leaderboard", type=str, default="Leaderboard.csv", help="Leaderboard CSV. Default: Leaderboard.csv.")
-    parser.add_argument("--corr-file", type=str, default="correlation_matrix.csv", help="Correlation matrix CSV. Default: correlation_matrix.csv.")
-    parser.add_argument("--vol-file", type=str, default="Volatilities.csv", help="Short-term volatility CSV. Default: Volatilities.csv.")
-    parser.add_argument("--vol-file2", type=str, default="Volatilities2.csv", help="Medium-term volatility CSV. Default: Volatilities2.csv.")
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument(
+        "--config",
+        type=str,
+        default="config.yaml",
+        help="YAML or JSON configuration file. Default: config.yaml if present.",
+    )
+    pre_args, _ = pre_parser.parse_known_args()
 
-    parser.add_argument("--days", type=int, default=None, help="Trading days remaining.")
-    parser.add_argument("--sims", type=int, default=400_000, help="Number of Monte Carlo simulations for final reporting.")
-    parser.add_argument("--seed", type=int, default=0, help="RNG seed.")
+    file_config = load_config_file(pre_args.config)
+    cfg = deep_update(DEFAULT_CONFIG, file_config)
 
-    parser.add_argument("--wp_vol_source", choices=["short", "medium"], default="short", help="Vols used only when --objective te needs to compute WinProbabilities_excl_anchor.csv.")
-    parser.add_argument("--opt_vol_source", choices=["short", "medium"], default="short", help="Vols used for TE, WIN, or VOL optimisation.")
-    parser.add_argument("--sim_vol_source", choices=["short", "medium"], default="medium", help="Vols used for final full contest simulation.")
+    parser = argparse.ArgumentParser(
+        description="Combined contest optimiser.",
+        parents=[pre_parser],
+    )
+    parser.add_argument("--objective", choices=["te", "win", "vol", "current"], default=cfg_get(cfg, "objective"), help="Portfolio objective.")
+    parser.add_argument("--anchor", type=str, default=cfg_get(cfg, "anchor"), help="Leaderboard player name to optimise/replace.")
+    parser.add_argument("--stocklist", type=str, default=cfg_get(cfg, "files.stocklist_csv"), help="CSV containing Symbol and optional Alternative Symbol columns.")
+    parser.add_argument("--leaderboard", type=str, default=cfg_get(cfg, "files.leaderboard_csv"), help="Leaderboard CSV.")
+    parser.add_argument("--corr-file", type=str, default=cfg_get(cfg, "files.corr_file"), help="Correlation matrix CSV.")
+    parser.add_argument("--vol-file", type=str, default=cfg_get(cfg, "files.vol_short_csv"), help="Short-term volatility CSV.")
+    parser.add_argument("--vol-file2", type=str, default=cfg_get(cfg, "files.vol_medium_csv"), help="Medium-term volatility CSV.")
 
-    parser.add_argument("--inner_sims", type=int, default=12_000, help="Inner simulations for --objective win.")
-    parser.add_argument("--rounds", type=int, default=8, help="Optimisation rounds for --objective te or win.")
-    parser.add_argument("--samples", type=int, default=450, help="Samples per round for --objective te or win.")
+    parser.add_argument("--days", type=int, default=cfg_get(cfg, "days"), help="Trading days remaining.")
+    parser.add_argument("--sims", type=int, default=cfg_get(cfg, "final_simulation.sims"), help="Number of Monte Carlo simulations for final reporting.")
+    parser.add_argument("--seed", type=int, default=cfg_get(cfg, "final_simulation.seed"), help="RNG seed.")
 
-    parser.add_argument("--exclude", type=str, default="", help="Comma-separated tickers to exclude from optimisation universe.")
-    parser.add_argument("--forced", type=str, default="", help='Forced holdings, e.g. "AAPL=25,NVDA=15,SHOP=10".')
-    parser.add_argument("--max_cash", type=int, default=25, help="Maximum CASH percent allowed in anchor portfolio. Default: 25.")
-    parser.add_argument("--winprob-file", type=str, default="WinProbabilities_excl_ahebb.csv", help="Win-probability CSV used/created only by --objective te.")
+    parser.add_argument("--wp_vol_source", choices=["short", "medium"], default=cfg_get(cfg, "model.wp_vol_source"), help="Vols used only when --objective te needs to compute the benchmark win-probability file.")
+    parser.add_argument("--opt_vol_source", choices=["short", "medium"], default=cfg_get(cfg, "model.opt_vol_source"), help="Vols used for TE, WIN, or VOL optimisation.")
+    parser.add_argument("--sim_vol_source", choices=["short", "medium"], default=cfg_get(cfg, "model.sim_vol_source"), help="Vols used for final full contest simulation.")
+
+    parser.add_argument("--inner_sims", type=int, default=cfg_get(cfg, "win_objective.inner_sims"), help="Inner simulations for --objective win.")
+    parser.add_argument("--rounds", type=int, default=cfg_get(cfg, "win_objective.rounds"), help="Optimisation rounds for --objective te or win.")
+    parser.add_argument("--samples", type=int, default=cfg_get(cfg, "win_objective.samples"), help="Samples per round for --objective te or win.")
+
+    parser.add_argument("--exclude", type=str, default=cfg_get(cfg, "exclude"), help="Comma-separated tickers to exclude from optimisation universe.")
+    parser.add_argument("--forced", type=str, default=cfg_get(cfg, "forced"), help='Forced holdings, e.g. "AAPL=25,NVDA=15,SHOP=10".')
+    parser.add_argument("--max_cash", type=int, default=cfg_get(cfg, "model.max_cash"), help="Maximum CASH percent allowed in anchor portfolio.")
+    parser.add_argument("--winprob-file", type=str, default=cfg_get(cfg, "files.winprob_path"), help="Win-probability CSV used/created only by --objective te.")
 
     args = parser.parse_args()
     days = get_days_remaining(args.days)
 
     print(
         f"Objective: {args.objective} | anchor={args.anchor} | corr={args.corr_file} | "
+        f"config={args.config} | "
         f"Vol sources: win-prob={args.wp_vol_source}, opt={args.opt_vol_source}, sim={args.sim_vol_source} | "
         f"max_cash={args.max_cash}%"
     )

@@ -1,0 +1,22 @@
+files:
+  leaderboard_csv: Leaderboard.csv
+  stocklist_csv: StockList.csv
+  corr_file: correlation_matrix.csv
+  vol_short_csv: Volatilities.csv
+  vol_medium_csv: Volatilities2.csv
+  winprob_path: WinProbabilities_excl_anchor.csv
+
+model:
+  wp_vol_source: short
+  opt_vol_source: short
+  sim_vol_source: medium
+  max_cash: 25
+
+win_objective:
+  inner_sims: 12000
+  rounds: 8
+  samples: 450
+
+final_simulation:
+  sims: 400000
+  seed: 0
