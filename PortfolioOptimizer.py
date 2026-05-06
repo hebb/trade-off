@@ -594,8 +594,14 @@ def sample_legal_portfolio(rng: np.random.Generator, tickers: List[str], ticker_
     if min_stock_sum > max_stock_sum:
         return sample_legal_portfolio(rng, tickers, ticker_probs, constraints, forced)
 
-    mode = min(100, max(min_stock_sum, int(round((min_stock_sum + max_stock_sum) / 2))))
-    stock_sum = int(round(rng.triangular(min_stock_sum, mode, max_stock_sum)))
+    min_stock_sum = int(round(min_stock_sum))
+    max_stock_sum = int(round(max_stock_sum))
+    if min_stock_sum == max_stock_sum:
+        stock_sum = min_stock_sum
+    else:
+        mode = min(max_stock_sum, max(min_stock_sum, int(round((min_stock_sum + max_stock_sum) / 2))))
+        stock_sum = int(round(rng.triangular(min_stock_sum, mode, max_stock_sum)))
+        stock_sum = min(max_stock_sum, max(min_stock_sum, stock_sum))
 
     alloc = np.full(k, constraints.min_weight, dtype=int)
     remaining = stock_sum - forced_weight - int(alloc.sum())
@@ -1295,6 +1301,7 @@ def run_all(
     max_cash: int,
     anchor_name: str,
     stocklist_csv: str,
+    selected_value: Optional[float] = None,
 ) -> None:
     symbol_alias_map = load_symbol_alias_map(stocklist_csv)
     if symbol_alias_map:
@@ -1331,32 +1338,50 @@ def run_all(
     if len(tickers_for_anchor) < constraints.min_stocks:
         raise ValueError("After exclusions, fewer than min_stocks tickers remain in the optimisation universe.")
 
+    lb = load_leaderboard(leaderboard_csv)
+    players, values, ports = build_player_portfolios(lb, symbol_alias_map=symbol_alias_map)
+    ports = {p: filter_portfolio_to_corr(ports[p], corr) for p in players}
+
+    def selected_start_value() -> float:
+        if selected_value is not None:
+            return float(selected_value)
+        if values:
+            v = float(max(values.values()))
+            print(f"Selected-portfolio starting value not supplied; using current leaderboard maximum: {v:.2f}")
+            return v
+        raise ValueError("Leaderboard.csv contains no usable players, so a selected starting value is required.")
+
+    anchor_port: Optional[Dict[str, float]] = None
+    run_final_sim = True
+
     if objective == "vol":
         print(f"\nOptimising for maximum volatility using {opt_vol_source.upper()}-TERM vols.")
         vol_port, best_var = solve_max_vol_portfolio(tickers_for_anchor, corr, vols_opt, forced, seed)
         if not is_legal_portfolio(vol_port, constraints, forced):
             raise RuntimeError("Internal error: maximum-volatility portfolio violates constraints.")
+        anchor_port = vol_port
         best_vol = math.sqrt(max(best_var, 0.0))
         print("\nMaximum-volatility portfolio (contest-legal):")
-        for t, wt in sorted(vol_port.items(), key=lambda x: x[1], reverse=True):
+        for t, wt in sorted(anchor_port.items(), key=lambda x: x[1], reverse=True):
             print(f"  {t:8s}  {wt * 100:6.2f}%")
         print(f"\nPortfolio volatility: {best_vol:.4%}")
         print(f"Portfolio variance:   {best_var:.8f}")
-        return
 
-    lb = load_leaderboard(leaderboard_csv)
-    players, values, ports = build_player_portfolios(lb, symbol_alias_map=symbol_alias_map)
-    if anchor_name not in players:
-        raise ValueError(f"Anchor {anchor_name!r} not found in Leaderboard.csv")
-    ports = {p: filter_portfolio_to_corr(ports[p], corr) for p in players}
+        if anchor_name not in players:
+            run_final_sim = False
+            print(f"\nAnchor {anchor_name!r} was not found in Leaderboard.csv, so no final win-probability simulation was run for the selected volatility portfolio.")
 
-    anchor_port: Dict[str, float]
-
-    if objective == "current":
-        anchor_port = ports[anchor_name]
-        if forced and not is_legal_portfolio(anchor_port, constraints, forced):
-            raise ValueError("--objective current was selected, but the current anchor portfolio does not satisfy --forced.")
-        print(f"\nUsing current {anchor_name} portfolio from Leaderboard.csv (no optimisation):")
+    elif objective == "current":
+        if anchor_name in ports:
+            anchor_port = ports[anchor_name]
+            if forced and not is_legal_portfolio(anchor_port, constraints, forced):
+                raise ValueError("--objective current was selected, but the current anchor portfolio does not satisfy --forced.")
+            print(f"\nUsing current {anchor_name} portfolio from Leaderboard.csv (no optimisation):")
+            for t, wt in sorted(anchor_port.items(), key=lambda x: x[1], reverse=True):
+                print(f"  {t:8s}  {wt * 100:6.2f}%")
+        else:
+            anchor_port = None
+            print(f"\nAnchor {anchor_name!r} was not found in Leaderboard.csv; simulating the current leaderboard as-is.")
 
     elif objective == "te":
         players_ex = [p for p in players if p != anchor_name]
@@ -1409,14 +1434,24 @@ def run_all(
         te_vs_bench = tracking_error_portfolios(anchor_port, bench, corr_u_te, vol_vec_te)
         print(f"\nTE(selected {anchor_name}, benchmark) {opt_vol_source.upper()}-TERM vols (ann.): {te_vs_bench:.6f}")
         print(f"\nTracking-error-minimising portfolio for {anchor_name} (contest-legal, cash capped):")
+        for t, wt in sorted(anchor_port.items(), key=lambda x: x[1], reverse=True):
+            print(f"  {t:8s}  {wt * 100:6.2f}%")
 
     elif objective == "win":
-        universe0 = sorted(set(tickers_for_anchor) | set(make_universe_from_players(players, ports)) | {"CASH"})
+        players_for_obj = list(players)
+        values_for_obj = dict(values)
+        ports_for_obj = dict(ports)
+        if anchor_name not in players_for_obj:
+            players_for_obj.append(anchor_name)
+            values_for_obj[anchor_name] = selected_start_value()
+            ports_for_obj[anchor_name] = {"CASH": 1.0}
+
+        universe0 = sorted(set(tickers_for_anchor) | set(make_universe_from_players(players_for_obj, ports_for_obj)) | {"CASH"})
         corr_u_opt, vol_vec_opt = ensure_corr_and_vol_coverage(universe0, corr, vols_opt)
         Sigma_ann_opt = cov_from_corr_vol(corr_u_opt, vol_vec_opt)
         u_index = {t: i for i, t in enumerate(universe0)}
-        W_full_current = {p: vectorize_port(ports[p], u_index) for p in players}
-        ctx_mc = make_mc_objective_context(players, values, W_full_current, Sigma_ann_opt, days_remaining, inner_sims, seed, anchor_name)
+        W_full_current = {p: vectorize_port(ports_for_obj[p], u_index) for p in players_for_obj}
+        ctx_mc = make_mc_objective_context(players_for_obj, values_for_obj, W_full_current, Sigma_ann_opt, days_remaining, inner_sims, seed, anchor_name)
 
         vol_bias = {t: opt_vols_for_universe.get(t, 0.0) for t in tickers_for_anchor}
         print(f"\nOptimising for win probability using {opt_vol_source.upper()}-TERM vols (inner MC objective, S={inner_sims}).")
@@ -1435,26 +1470,43 @@ def run_all(
             polish_steps=800,
         )
         print(f"\nWin-probability-optimised portfolio for {anchor_name} (contest-legal, cash capped):")
+        for t, wt in sorted(anchor_port.items(), key=lambda x: x[1], reverse=True):
+            print(f"  {t:8s}  {wt * 100:6.2f}%")
 
     else:
         raise ValueError("--objective must be 'te', 'win', 'vol', or 'current'.")
 
-    if not is_legal_portfolio(anchor_port, constraints, forced):
+    if anchor_port is not None and not is_legal_portfolio(anchor_port, constraints, forced):
         raise RuntimeError(f"Internal error: chosen {anchor_name} portfolio violates constraints.")
 
-    for t, wt in sorted(anchor_port.items(), key=lambda x: x[1], reverse=True):
-        print(f"  {t:8s}  {wt * 100:6.2f}%")
+    if not run_final_sim:
+        return
 
-    # Final full contest simulation including chosen anchor.
+    # Final full contest simulation.  If a selected portfolio exists, it replaces the
+    # anchor when the anchor is already in the leaderboard.  For TE/WIN, a synthetic
+    # entrant can still be added when selected_value is supplied or can be inferred.
+    players_sim = list(players)
+    values_sim = dict(values)
     ports_adj = dict(ports)
-    ports_adj[anchor_name] = anchor_port
-    universe_full = make_universe_from_players(players, ports_adj)
+
+    if anchor_port is not None:
+        if anchor_name not in players_sim:
+            if objective in {"te", "win"}:
+                players_sim.append(anchor_name)
+                values_sim[anchor_name] = selected_start_value()
+                print(f"\nAdded synthetic entrant {anchor_name!r} for final simulation with starting value {values_sim[anchor_name]:.2f}.")
+            else:
+                print(f"\nAnchor {anchor_name!r} was not found in Leaderboard.csv, so the selected portfolio cannot be inserted into the final contest simulation.")
+                return
+        ports_adj[anchor_name] = anchor_port
+
+    universe_full = make_universe_from_players(players_sim, ports_adj)
     corr_u_sim, vol_vec_sim = ensure_corr_and_vol_coverage(universe_full, corr, vols_sim)
     Sigma_ann_sim = cov_from_corr_vol(corr_u_sim, vol_vec_sim)
     u_index_sim = {t: i for i, t in enumerate(universe_full)}
-    W_full = {p: vectorize_port(ports_adj[p], u_index_sim) for p in players}
-    W_mat_full = np.stack([W_full[p] for p in players], axis=0)
-    finish_full, _, n_used = simulate_finish_probs(players, values, W_mat_full, Sigma_ann_sim, days_remaining, n_sims=n_sims, seed=seed, return_counts=True)
+    W_full = {p: vectorize_port(ports_adj[p], u_index_sim) for p in players_sim}
+    W_mat_full = np.stack([W_full[p] for p in players_sim], axis=0)
+    finish_full, _, n_used = simulate_finish_probs(players_sim, values_sim, W_mat_full, Sigma_ann_sim, days_remaining, n_sims=n_sims, seed=seed, return_counts=True)
 
     if anchor_name in finish_full:
         pa = finish_full[anchor_name]
@@ -1463,28 +1515,34 @@ def run_all(
             p_hat = float(pa[k])
             moe = moe95(p_hat, n_used)
             print(f"  {k:6s}: {p_hat * 100:7.3f}%  (±{moe * 100:5.3f}%)")
+    else:
+        print(f"\nAnchor {anchor_name!r} is not in the leaderboard, so no anchor-specific finish probabilities were printed.")
 
-    w_a = W_full[anchor_name]
+    w_anchor = W_full.get(anchor_name)
     te_to_a = {}
     ann_vol = {}
-    for p in players:
+    for p in players_sim:
         w_p = W_full[p]
-        diff = w_a - w_p
-        te_to_a[p] = float(math.sqrt(max(diff @ Sigma_ann_sim @ diff, 0.0)))
+        if w_anchor is not None:
+            diff = w_anchor - w_p
+            te_to_a[p] = float(math.sqrt(max(diff @ Sigma_ann_sim @ diff, 0.0)))
         ann_vol[p] = float(math.sqrt(max(w_p @ Sigma_ann_sim @ w_p, 0.0)))
 
     out_rows = []
-    for p in players:
-        out_rows.append({
+    for p in players_sim:
+        row = {
             "Player": p,
-            "CurrentValue": values[p],
+            "CurrentValue": values_sim[p],
             "P1st": finish_full[p]["P1st"],
             "P2nd": finish_full[p]["P2nd"],
             "P3rd": finish_full[p]["P3rd"],
             "PWorse": finish_full[p]["PWorse"],
-            f"TrackingError_to_{anchor_name}": te_to_a[p],
             "AnnualizedVolatility": ann_vol[p],
-        })
+        }
+        if w_anchor is not None:
+            row[f"TrackingError_to_{anchor_name}"] = te_to_a[p]
+        out_rows.append(row)
+
     pd.DataFrame(out_rows).sort_values("P1st", ascending=False).to_csv("contest_results.csv", index=False)
     print("\nWrote: contest_results.csv")
 
@@ -1537,7 +1595,8 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default=None, help="Configuration file. Default: config.yaml if it exists.")
 
     parser.add_argument("--objective", choices=["te", "win", "vol", "current"], default=None, help="Portfolio objective.")
-    parser.add_argument("--anchor", type=str, default=None, help="Leaderboard player name to optimise/replace. Overrides the config file.")
+    parser.add_argument("--anchor", type=str, default=None, help="Selected portfolio name. Overrides the config file.")
+    parser.add_argument("--selected-value", type=float, default=None, help="Starting value for the selected portfolio if it is not in the leaderboard.")
     parser.add_argument("--stocklist", type=str, default=None, help="CSV containing Symbol and optional Alternative Symbol columns.")
     parser.add_argument("--leaderboard", type=str, default=None, help="Leaderboard CSV.")
     parser.add_argument("--corr-file", type=str, default=None, help="Correlation matrix CSV.")
@@ -1573,6 +1632,8 @@ if __name__ == "__main__":
     if anchor is None:
         anchor = choose(None, config, "model", "anchor", "ahebb")
     anchor = str(anchor)
+    selected_value_raw = choose(args.selected_value, config, "run", "selected_value", None)
+    selected_value = None if selected_value_raw is None or str(selected_value_raw).strip() == "" else float(selected_value_raw)
 
     leaderboard = str(choose(args.leaderboard, config, "files", "leaderboard_csv", "Leaderboard.csv"))
     stocklist = str(choose(args.stocklist, config, "files", "stocklist_csv", "StockList.csv"))
@@ -1635,4 +1696,5 @@ if __name__ == "__main__":
         max_cash=max_cash,
         anchor_name=anchor,
         stocklist_csv=stocklist,
+        selected_value=selected_value,
     )
