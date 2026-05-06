@@ -22,9 +22,9 @@ Key points:
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import os
+import json
 import random
 from collections import deque
 from dataclasses import dataclass
@@ -50,88 +50,6 @@ ELITE_POOL_START_FRAC = 0.35
 TEMP_START_MULT = 0.08
 TEMP_END_MULT = 0.001
 EPS = 1e-15
-
-
-# -----------------------------
-# Configuration loading
-# -----------------------------
-
-DEFAULT_CONFIG = {
-    "objective": "te",
-    "anchor": "ahebb",
-    "days": None,
-    "exclude": "",
-    "forced": "",
-    "files": {
-        "leaderboard_csv": "Leaderboard.csv",
-        "stocklist_csv": "StockList.csv",
-        "corr_file": "correlation_matrix.csv",
-        "vol_short_csv": "Volatilities.csv",
-        "vol_medium_csv": "Volatilities2.csv",
-        "winprob_path": "WinProbabilities_excl_ahebb.csv",
-    },
-    "model": {
-        "wp_vol_source": "medium",
-        "opt_vol_source": "medium",
-        "sim_vol_source": "medium",
-        "max_cash": 25,
-    },
-    "win_objective": {
-        "inner_sims": 12_000,
-        "rounds": 8,
-        "samples": 450,
-    },
-    "final_simulation": {
-        "sims": 400_000,
-        "seed": 0,
-    },
-}
-
-
-def deep_update(base: dict, updates: dict) -> dict:
-    """Recursively merge updates into base and return a new dictionary."""
-    out = dict(base)
-    for key, value in (updates or {}).items():
-        if isinstance(value, dict) and isinstance(out.get(key), dict):
-            out[key] = deep_update(out[key], value)
-        else:
-            out[key] = value
-    return out
-
-
-def load_config_file(path: Optional[str]) -> dict:
-    """Load YAML or JSON config. Missing default config files are ignored."""
-    if not path:
-        return {}
-    if not os.path.exists(path):
-        if path == "config.yaml":
-            return {}
-        raise FileNotFoundError(f"Config file not found: {path}")
-
-    with open(path, "r", encoding="utf-8") as f:
-        if path.lower().endswith(".json"):
-            data = json.load(f)
-        else:
-            try:
-                import yaml
-            except ImportError as exc:
-                raise ImportError("Reading YAML config files requires PyYAML. Install it or use a JSON config file.") from exc
-            data = yaml.safe_load(f) or {}
-
-    if not isinstance(data, dict):
-        raise ValueError("Config file must contain a mapping at the top level.")
-    return data
-
-
-def cfg_get(cfg: dict, dotted: str, fallback=None):
-    """Read nested config values, with a fallback to a flat key of the same final name."""
-    cur = cfg
-    for part in dotted.split("."):
-        if not isinstance(cur, dict) or part not in cur:
-            flat_key = dotted.split(".")[-1]
-            return cfg.get(flat_key, fallback) if isinstance(cfg, dict) else fallback
-        cur = cur[part]
-    return cur
 
 
 # -----------------------------
@@ -676,11 +594,8 @@ def sample_legal_portfolio(rng: np.random.Generator, tickers: List[str], ticker_
     if min_stock_sum > max_stock_sum:
         return sample_legal_portfolio(rng, tickers, ticker_probs, constraints, forced)
 
-    if min_stock_sum == max_stock_sum:
-        stock_sum = int(min_stock_sum)
-    else:
-        mode = min(max_stock_sum, max(min_stock_sum, int(round((min_stock_sum + max_stock_sum) / 2))))
-        stock_sum = int(round(rng.triangular(min_stock_sum, mode, max_stock_sum)))
+    mode = min(100, max(min_stock_sum, int(round((min_stock_sum + max_stock_sum) / 2))))
+    stock_sum = int(round(rng.triangular(min_stock_sum, mode, max_stock_sum)))
 
     alloc = np.full(k, constraints.min_weight, dtype=int)
     remaining = stock_sum - forced_weight - int(alloc.sum())
@@ -1404,13 +1319,8 @@ def run_all(
 
     constraints = ContestConstraints(min_stocks=5, min_weight=5, max_weight=25, step=1, allow_cash=True, max_cash=max_cash)
 
-    lb = load_leaderboard(leaderboard_csv)
-    players, values, ports = build_player_portfolios(lb, symbol_alias_map=symbol_alias_map)
-    if anchor_name not in players:
-        raise ValueError(f"Anchor {anchor_name!r} not found in Leaderboard.csv")
-    ports = {p: filter_portfolio_to_corr(ports[p], corr) for p in players}
-
     # General optimisation universe: all tickers in the selected objective volatility file and correlation matrix.
+    # The VOL objective is independent of the leaderboard and does not require an anchor.
     opt_vols_for_universe = vols_opt
     available_tickers = sorted(set(corr.index) & set(opt_vols_for_universe.keys()))
     tickers_for_anchor = [t for t in available_tickers if t not in exclude_set]
@@ -1420,6 +1330,25 @@ def run_all(
     tickers_for_anchor = sorted(set(tickers_for_anchor))
     if len(tickers_for_anchor) < constraints.min_stocks:
         raise ValueError("After exclusions, fewer than min_stocks tickers remain in the optimisation universe.")
+
+    if objective == "vol":
+        print(f"\nOptimising for maximum volatility using {opt_vol_source.upper()}-TERM vols.")
+        vol_port, best_var = solve_max_vol_portfolio(tickers_for_anchor, corr, vols_opt, forced, seed)
+        if not is_legal_portfolio(vol_port, constraints, forced):
+            raise RuntimeError("Internal error: maximum-volatility portfolio violates constraints.")
+        best_vol = math.sqrt(max(best_var, 0.0))
+        print("\nMaximum-volatility portfolio (contest-legal):")
+        for t, wt in sorted(vol_port.items(), key=lambda x: x[1], reverse=True):
+            print(f"  {t:8s}  {wt * 100:6.2f}%")
+        print(f"\nPortfolio volatility: {best_vol:.4%}")
+        print(f"Portfolio variance:   {best_var:.8f}")
+        return
+
+    lb = load_leaderboard(leaderboard_csv)
+    players, values, ports = build_player_portfolios(lb, symbol_alias_map=symbol_alias_map)
+    if anchor_name not in players:
+        raise ValueError(f"Anchor {anchor_name!r} not found in Leaderboard.csv")
+    ports = {p: filter_portfolio_to_corr(ports[p], corr) for p in players}
 
     anchor_port: Dict[str, float]
 
@@ -1507,14 +1436,6 @@ def run_all(
         )
         print(f"\nWin-probability-optimised portfolio for {anchor_name} (contest-legal, cash capped):")
 
-    elif objective == "vol":
-        print(f"\nOptimising for maximum volatility using {opt_vol_source.upper()}-TERM vols.")
-        anchor_port, best_var = solve_max_vol_portfolio(tickers_for_anchor, corr, vols_opt, forced, seed)
-        best_vol = math.sqrt(max(best_var, 0.0))
-        print(f"\nMaximum-volatility portfolio for {anchor_name} (contest-legal):")
-        print(f"Portfolio volatility: {best_vol:.4%}")
-        print(f"Portfolio variance:   {best_var:.8f}")
-
     else:
         raise ValueError("--objective must be 'te', 'win', 'vol', or 'current'.")
 
@@ -1568,77 +1489,150 @@ def run_all(
     print("\nWrote: contest_results.csv")
 
 
+def load_config_file(path: str) -> Dict[str, object]:
+    """Load a YAML or JSON configuration file. Missing files return an empty config."""
+    if not path or not os.path.exists(path):
+        return {}
+
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    if not text.strip():
+        return {}
+
+    if path.lower().endswith(".json"):
+        data = json.loads(text)
+    else:
+        try:
+            import yaml  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                f"Configuration file {path!r} appears to be YAML, but PyYAML is not installed. "
+                "Install it with: pip install pyyaml"
+            ) from exc
+        data = yaml.safe_load(text)
+
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Configuration file {path!r} must contain a mapping at the top level.")
+    return data
+
+
+def cfg_get(config: Dict[str, object], section: str, key: str, default):
+    sec = config.get(section, {})
+    if isinstance(sec, dict) and key in sec:
+        return sec[key]
+    if key in config:
+        return config[key]
+    return default
+
+
+def choose(cli_value, config: Dict[str, object], section: str, key: str, default):
+    return cli_value if cli_value is not None else cfg_get(config, section, key, default)
+
+
 if __name__ == "__main__":
-    pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument(
-        "--config",
-        type=str,
-        default="config.yaml",
-        help="YAML or JSON configuration file. Default: config.yaml if present.",
-    )
-    pre_args, _ = pre_parser.parse_known_args()
+    parser = argparse.ArgumentParser(description="Combined contest optimiser.")
+    parser.add_argument("--config", type=str, default=None, help="Configuration file. Default: config.yaml if it exists.")
 
-    file_config = load_config_file(pre_args.config)
-    cfg = deep_update(DEFAULT_CONFIG, file_config)
+    parser.add_argument("--objective", choices=["te", "win", "vol", "current"], default=None, help="Portfolio objective.")
+    parser.add_argument("--anchor", type=str, default=None, help="Leaderboard player name to optimise/replace. Overrides the config file.")
+    parser.add_argument("--stocklist", type=str, default=None, help="CSV containing Symbol and optional Alternative Symbol columns.")
+    parser.add_argument("--leaderboard", type=str, default=None, help="Leaderboard CSV.")
+    parser.add_argument("--corr-file", type=str, default=None, help="Correlation matrix CSV.")
+    parser.add_argument("--vol-file", type=str, default=None, help="Short-term volatility CSV.")
+    parser.add_argument("--vol-file2", type=str, default=None, help="Medium-term volatility CSV.")
 
-    parser = argparse.ArgumentParser(
-        description="Combined contest optimiser.",
-        parents=[pre_parser],
-    )
-    parser.add_argument("--objective", choices=["te", "win", "vol", "current"], default=cfg_get(cfg, "objective"), help="Portfolio objective.")
-    parser.add_argument("--anchor", type=str, default=cfg_get(cfg, "anchor"), help="Leaderboard player name to optimise/replace.")
-    parser.add_argument("--stocklist", type=str, default=cfg_get(cfg, "files.stocklist_csv"), help="CSV containing Symbol and optional Alternative Symbol columns.")
-    parser.add_argument("--leaderboard", type=str, default=cfg_get(cfg, "files.leaderboard_csv"), help="Leaderboard CSV.")
-    parser.add_argument("--corr-file", type=str, default=cfg_get(cfg, "files.corr_file"), help="Correlation matrix CSV.")
-    parser.add_argument("--vol-file", type=str, default=cfg_get(cfg, "files.vol_short_csv"), help="Short-term volatility CSV.")
-    parser.add_argument("--vol-file2", type=str, default=cfg_get(cfg, "files.vol_medium_csv"), help="Medium-term volatility CSV.")
+    parser.add_argument("--days", type=int, default=None, help="Trading days remaining.")
+    parser.add_argument("--sims", type=int, default=None, help="Number of Monte Carlo simulations for final reporting.")
+    parser.add_argument("--seed", type=int, default=None, help="RNG seed.")
 
-    parser.add_argument("--days", type=int, default=cfg_get(cfg, "days"), help="Trading days remaining.")
-    parser.add_argument("--sims", type=int, default=cfg_get(cfg, "final_simulation.sims"), help="Number of Monte Carlo simulations for final reporting.")
-    parser.add_argument("--seed", type=int, default=cfg_get(cfg, "final_simulation.seed"), help="RNG seed.")
+    parser.add_argument("--wp_vol_source", choices=["short", "medium"], default=None, help="Vols used only when --objective te needs to compute win probabilities.")
+    parser.add_argument("--opt_vol_source", choices=["short", "medium"], default=None, help="Vols used for TE, WIN, or VOL optimisation.")
+    parser.add_argument("--sim_vol_source", choices=["short", "medium"], default=None, help="Vols used for final full contest simulation.")
 
-    parser.add_argument("--wp_vol_source", choices=["short", "medium"], default=cfg_get(cfg, "model.wp_vol_source"), help="Vols used only when --objective te needs to compute the benchmark win-probability file.")
-    parser.add_argument("--opt_vol_source", choices=["short", "medium"], default=cfg_get(cfg, "model.opt_vol_source"), help="Vols used for TE, WIN, or VOL optimisation.")
-    parser.add_argument("--sim_vol_source", choices=["short", "medium"], default=cfg_get(cfg, "model.sim_vol_source"), help="Vols used for final full contest simulation.")
+    parser.add_argument("--inner_sims", type=int, default=None, help="Inner simulations for --objective win.")
+    parser.add_argument("--rounds", type=int, default=None, help="Optimisation rounds for --objective te or win.")
+    parser.add_argument("--samples", type=int, default=None, help="Samples per round for --objective te or win.")
 
-    parser.add_argument("--inner_sims", type=int, default=cfg_get(cfg, "win_objective.inner_sims"), help="Inner simulations for --objective win.")
-    parser.add_argument("--rounds", type=int, default=cfg_get(cfg, "win_objective.rounds"), help="Optimisation rounds for --objective te or win.")
-    parser.add_argument("--samples", type=int, default=cfg_get(cfg, "win_objective.samples"), help="Samples per round for --objective te or win.")
-
-    parser.add_argument("--exclude", type=str, default=cfg_get(cfg, "exclude"), help="Comma-separated tickers to exclude from optimisation universe.")
-    parser.add_argument("--forced", type=str, default=cfg_get(cfg, "forced"), help='Forced holdings, e.g. "AAPL=25,NVDA=15,SHOP=10".')
-    parser.add_argument("--max_cash", type=int, default=cfg_get(cfg, "model.max_cash"), help="Maximum CASH percent allowed in anchor portfolio.")
-    parser.add_argument("--winprob-file", type=str, default=cfg_get(cfg, "files.winprob_path"), help="Win-probability CSV used/created only by --objective te.")
+    parser.add_argument("--exclude", type=str, default=None, help="Comma-separated tickers to exclude from optimisation universe.")
+    parser.add_argument("--forced", type=str, default=None, help='Forced holdings, e.g. "AAPL=25,NVDA=15,SHOP=10".')
+    parser.add_argument("--max_cash", type=int, default=None, help="Maximum CASH percent allowed in anchor portfolio.")
+    parser.add_argument("--winprob-file", type=str, default=None, help="Win-probability CSV used/created only by --objective te.")
 
     args = parser.parse_args()
-    days = get_days_remaining(args.days)
+
+    config_path = args.config
+    if config_path is None and os.path.exists("config.yaml"):
+        config_path = "config.yaml"
+    config = load_config_file(config_path) if config_path else {}
+
+    objective = str(choose(args.objective, config, "run", "objective", "te"))
+    anchor = choose(args.anchor, config, "run", "anchor", None)
+    if anchor is None:
+        anchor = choose(None, config, "model", "anchor", "ahebb")
+    anchor = str(anchor)
+
+    leaderboard = str(choose(args.leaderboard, config, "files", "leaderboard_csv", "Leaderboard.csv"))
+    stocklist = str(choose(args.stocklist, config, "files", "stocklist_csv", "StockList.csv"))
+    corr_file = str(choose(args.corr_file, config, "files", "corr_file", "correlation_matrix.csv"))
+    vol_file = str(choose(args.vol_file, config, "files", "vol_short_csv", "Volatilities.csv"))
+    vol_file2 = str(choose(args.vol_file2, config, "files", "vol_medium_csv", "Volatilities2.csv"))
+    winprob_file = str(choose(args.winprob_file, config, "files", "winprob_path", "WinProbabilities_excl_anchor.csv"))
+
+    days_arg = choose(args.days, config, "run", "days", None)
+    days = get_days_remaining(None if days_arg is None else int(days_arg))
+    sims = int(choose(args.sims, config, "final_simulation", "sims", 400_000))
+    seed = int(choose(args.seed, config, "final_simulation", "seed", 0))
+
+    wp_vol_source = str(choose(args.wp_vol_source, config, "model", "wp_vol_source", "medium"))
+    opt_vol_source = str(choose(args.opt_vol_source, config, "model", "opt_vol_source", "medium"))
+    sim_vol_source = str(choose(args.sim_vol_source, config, "model", "sim_vol_source", "medium"))
+
+    inner_sims = int(choose(args.inner_sims, config, "win_objective", "inner_sims", 12_000))
+    rounds = int(choose(args.rounds, config, "win_objective", "rounds", 8))
+    samples = int(choose(args.samples, config, "win_objective", "samples", 450))
+
+    exclude = str(choose(args.exclude, config, "run", "exclude", ""))
+    forced = str(choose(args.forced, config, "run", "forced", ""))
+    max_cash = int(choose(args.max_cash, config, "model", "max_cash", 25))
+
+    valid_vol_sources = {"short", "medium"}
+    for label, value in [
+        ("wp_vol_source", wp_vol_source),
+        ("opt_vol_source", opt_vol_source),
+        ("sim_vol_source", sim_vol_source),
+    ]:
+        if value not in valid_vol_sources:
+            raise ValueError(f"{label} must be one of {sorted(valid_vol_sources)}; got {value!r}.")
 
     print(
-        f"Objective: {args.objective} | anchor={args.anchor} | corr={args.corr_file} | "
-        f"config={args.config} | "
-        f"Vol sources: win-prob={args.wp_vol_source}, opt={args.opt_vol_source}, sim={args.sim_vol_source} | "
-        f"max_cash={args.max_cash}%"
+        f"Objective: {objective} | anchor={anchor} | corr={corr_file} | "
+        f"config={config_path or 'none'} | "
+        f"Vol sources: win-prob={wp_vol_source}, opt={opt_vol_source}, sim={sim_vol_source} | "
+        f"max_cash={max_cash}%"
     )
 
     run_all(
-        objective=args.objective,
-        leaderboard_csv=args.leaderboard,
-        corr_csv=args.corr_file,
-        vol_short_csv=args.vol_file,
-        vol_medium_csv=args.vol_file2,
+        objective=objective,
+        leaderboard_csv=leaderboard,
+        corr_csv=corr_file,
+        vol_short_csv=vol_file,
+        vol_medium_csv=vol_file2,
         days_remaining=days,
-        n_sims=args.sims,
-        seed=args.seed,
-        winprob_path=args.winprob_file,
-        wp_vol_source=args.wp_vol_source,
-        opt_vol_source=args.opt_vol_source,
-        sim_vol_source=args.sim_vol_source,
-        inner_sims=args.inner_sims,
-        rounds=args.rounds,
-        samples=args.samples,
-        exclude_tickers=args.exclude,
-        forced_holdings=args.forced,
-        max_cash=args.max_cash,
-        anchor_name=args.anchor,
-        stocklist_csv=args.stocklist,
+        n_sims=sims,
+        seed=seed,
+        winprob_path=winprob_file,
+        wp_vol_source=wp_vol_source,
+        opt_vol_source=opt_vol_source,
+        sim_vol_source=sim_vol_source,
+        inner_sims=inner_sims,
+        rounds=rounds,
+        samples=samples,
+        exclude_tickers=exclude,
+        forced_holdings=forced,
+        max_cash=max_cash,
+        anchor_name=anchor,
+        stocklist_csv=stocklist,
     )

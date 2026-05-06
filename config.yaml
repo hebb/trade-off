@@ -20,3 +20,10 @@ win_objective:
 final_simulation:
   sims: 400000
   seed: 0
+
+run:
+  objective: te
+  anchor: AndrewHebb
+  days: 28
+  exclude: ""
+  forced: ""
