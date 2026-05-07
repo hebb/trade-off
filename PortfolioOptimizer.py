@@ -472,9 +472,17 @@ def simulate_finish_probs(players: List[str], values: Dict[str, float], W_mat: n
     for start in range(0, n_sims, batch):
         b = min(batch, n_sims - start)
         Z = rng.standard_normal(size=(b, days_remaining, C.shape[0]))
-        R = mu_day + (Z @ L.T)
-        port_r = np.einsum("bdk,pk->bdp", R, W_mat)
-        logV = logV0 + port_r.sum(axis=1)
+        R_daily = mu_day + (Z @ L.T)
+
+        # Simulate terminal stock gross returns first, then weight gross returns.
+        # Do not use W @ log_returns; that is the geometric portfolio return,
+        # not the terminal buy-and-hold portfolio return used by the contest.
+        asset_log_T = R_daily.sum(axis=1)
+        asset_gross_T = np.exp(asset_log_T)
+        portfolio_gross_T = asset_gross_T @ W_mat.T
+        portfolio_gross_T = np.maximum(portfolio_gross_T, 1e-300)
+        logV = logV0[None, :] + np.log(portfolio_gross_T)
+
         order = np.argsort(-logV, axis=1)
         pos = np.full((b, nP), 3, dtype=np.int8)
         pos[np.arange(b), order[:, 0]] = 0
@@ -772,7 +780,7 @@ def cross_entropy_optimise(
 
 @dataclass
 class MonteCarloObjectiveContext:
-    r_T: np.ndarray
+    asset_gross_T: np.ndarray
     max_logV_other: np.ndarray
     logV0_a: float
 
@@ -790,19 +798,26 @@ def make_mc_objective_context(players: List[str], values: Dict[str, float], W_fu
 
     rng = np.random.default_rng(seed + 12345)
     Z = rng.standard_normal(size=(inner_sims, cov_T.shape[0]))
-    r_T = mean_T + (Z @ L.T)
+    asset_log_T = mean_T + (Z @ L.T)
+    asset_gross_T = np.exp(asset_log_T)
 
     logV0_a = float(math.log(values[anchor]))
     players_other = [p for p in players if p != anchor]
     W_other = np.stack([W_full[p] for p in players_other], axis=0)
     logV0_other = np.array([math.log(values[p]) for p in players_other], dtype=float)
-    logV_other = logV0_other[None, :] + (r_T @ W_other.T)
+
+    # Opponent terminal values use weighted gross returns, matching a buy-and-hold contest portfolio.
+    gross_other = asset_gross_T @ W_other.T
+    gross_other = np.maximum(gross_other, 1e-300)
+    logV_other = logV0_other[None, :] + np.log(gross_other)
     max_logV_other = np.max(logV_other, axis=1)
-    return MonteCarloObjectiveContext(r_T=r_T, max_logV_other=max_logV_other, logV0_a=logV0_a)
+    return MonteCarloObjectiveContext(asset_gross_T=asset_gross_T, max_logV_other=max_logV_other, logV0_a=logV0_a)
 
 
 def mc_win_prob_first(w_anchor: np.ndarray, ctx: MonteCarloObjectiveContext) -> Tuple[float, float]:
-    logV_anchor = ctx.logV0_a + (ctx.r_T @ w_anchor)
+    gross_anchor = ctx.asset_gross_T @ w_anchor
+    gross_anchor = np.maximum(gross_anchor, 1e-300)
+    logV_anchor = ctx.logV0_a + np.log(gross_anchor)
     p_hat = float(np.mean(logV_anchor > ctx.max_logV_other))
     return float(math.log(p_hat + 1e-12)), p_hat
 
