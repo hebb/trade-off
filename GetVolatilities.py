@@ -2,6 +2,7 @@ import math
 import re
 import json
 import html as html_lib
+import os
 import datetime as dt
 from dataclasses import dataclass
 from typing import Optional
@@ -14,15 +15,19 @@ from bs4 import BeautifulSoup
 from scipy.optimize import brentq
 from scipy.stats import norm
 
+try:
+    import pandas_market_calendars as mcal
+except Exception:
+    mcal = None
 
-INPUT_FILE = "StockList.csv"
+
+INPUT_FILE = "StockList_with_earnings.csv" if os.path.exists("StockList_with_earnings.csv") else "StockList.csv"
 OUTPUT_FILE = "StockList_with_IV.csv"
 
 RISK_FREE_RATE = 0.03
 HIST_VOL_LOOKBACK_DAYS = 60
 REQUEST_TIMEOUT = 20
 MAX_STRIKES_PER_SIDE = 4
-
 MIN_EXPIRY_QUALITY = 0.25
 MIN_WEIGHT_TO_KEEP = 1e-6
 
@@ -56,20 +61,16 @@ class IVResult:
 def bs_call_price(S, K, T, r, sigma):
     if sigma <= 0 or T <= 0:
         return max(S - K * math.exp(-r * T), 0.0)
-
     d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
     d2 = d1 - sigma * math.sqrt(T)
-
     return S * norm.cdf(d1) - K * math.exp(-r * T) * norm.cdf(d2)
 
 
 def bs_put_price(S, K, T, r, sigma):
     if sigma <= 0 or T <= 0:
         return max(K * math.exp(-r * T) - S, 0.0)
-
     d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
     d2 = d1 - sigma * math.sqrt(T)
-
     return K * math.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
 
 
@@ -133,7 +134,7 @@ def clean_df(path):
         raise ValueError("Input file must contain a Symbol column.")
 
     if "Primary Exchange" in df.columns:
-        df = df.drop(columns=["Primary Exchange"])
+        df["Primary Exchange"] = df["Primary Exchange"].astype("object")
 
     numeric_cols = ["Implied Volatility", "Forward Implied Volatility"]
     text_cols = [
@@ -186,11 +187,6 @@ def safe_float(x, default=0.0):
         return default
 
 
-def moneyness_weight(K, spot):
-    m = abs(math.log(K / spot))
-    return math.exp(-m / 0.05)
-
-
 def liquidity_score(volume, open_interest):
     volume = max(safe_float(volume), 0.0)
     open_interest = max(safe_float(open_interest), 0.0)
@@ -209,6 +205,106 @@ def size_score(bid_size, ask_size):
     ask_quality = math.log1p(ask_size) / math.log1p(10)
 
     return min(1.0, 0.5 * bid_quality + 0.5 * ask_quality)
+
+
+def exchange_calendar_name(primary_exchange: str) -> Optional[str]:
+    x = str(primary_exchange or "").strip().upper()
+
+    if x in {"NYSE", "NEW YORK STOCK EXCHANGE", "NASDAQ", "NASDAQGS", "NASDAQGM", "NASDAQCM", "AMEX", "NYSEARCA"}:
+        return "XNYS"
+
+    if x in {"TSX", "TORONTO", "TORONTO STOCK EXCHANGE", "TSXV", "TSX VENTURE"}:
+        return "XTSE"
+
+    return None
+
+
+def get_last_close_next_open(primary_exchange: str):
+    if mcal is None:
+        return None, None, "pandas_market_calendars not installed"
+
+    cal_name = exchange_calendar_name(primary_exchange)
+    if cal_name is None:
+        return None, None, f"unknown exchange: {primary_exchange}"
+
+    try:
+        cal = mcal.get_calendar(cal_name)
+        now_utc = pd.Timestamp.now(tz="UTC")
+
+        sched = cal.schedule(
+            start_date=(now_utc - pd.Timedelta(days=10)).date(),
+            end_date=(now_utc + pd.Timedelta(days=10)).date(),
+        )
+
+        closes = sched["market_close"][sched["market_close"] <= now_utc]
+        opens = sched["market_open"][sched["market_open"] > now_utc]
+
+        if closes.empty or opens.empty:
+            return None, None, "could not identify last close / next open"
+
+        return closes.iloc[-1], opens.iloc[0], "ok"
+
+    except Exception as e:
+        return None, None, f"calendar failed: {e}"
+
+
+def earnings_event_time(row, last_close, next_open):
+    if "Next Earnings Date" not in row.index or "Earnings Timing" not in row.index:
+        return None, "missing earnings columns"
+
+    raw_date = row.get("Next Earnings Date")
+    timing = str(row.get("Earnings Timing", "")).strip()
+
+    if pd.isna(raw_date) or str(raw_date).strip() == "":
+        return None, "no earnings date"
+
+    try:
+        earnings_date = pd.to_datetime(raw_date).date()
+    except Exception:
+        return None, f"bad earnings date: {raw_date}"
+
+    tz = last_close.tz
+
+    if timing == "After Market Close":
+        event_time = pd.Timestamp.combine(earnings_date, dt.time(16, 1)).tz_localize(tz)
+
+    elif timing == "Before Market Open":
+        event_time = pd.Timestamp.combine(earnings_date, dt.time(9, 29)).tz_localize(tz)
+
+    elif timing == "Unknown":
+        last_close_date = last_close.tz_convert(tz).date()
+        next_open_date = next_open.tz_convert(tz).date()
+
+        if earnings_date in {last_close_date, next_open_date}:
+            return next_open - pd.Timedelta(minutes=1), "ok; unknown timing treated as inside overnight window"
+
+        return None, "unknown timing outside overnight-window dates"
+
+    else:
+        return None, f"unknown earnings timing: {timing}"
+
+    return event_time.tz_convert("UTC"), "ok"
+
+
+def earnings_between_last_close_and_next_open(row):
+    primary_exchange = row.get("Primary Exchange", "")
+
+    last_close, next_open, cal_status = get_last_close_next_open(primary_exchange)
+
+    if last_close is None or next_open is None:
+        return False, cal_status
+
+    event_time, event_status = earnings_event_time(row, last_close, next_open)
+
+    if event_time is None:
+        return False, event_status
+
+    inside = last_close <= event_time <= next_open
+
+    return inside, (
+        f"{'inside' if inside else 'outside'} overnight window; "
+        f"last_close={last_close}; next_open={next_open}; event={event_time}; timing={event_status}"
+    )
 
 
 def get_yf_expiries(ticker):
@@ -460,10 +556,11 @@ def mx_iv_for_expiry(rows, expiry, spot):
         else:
             continue
 
-        if r.kind == "call":
-            model = bs_call_price(spot, r.strike, T, RISK_FREE_RATE, r.mx_iv)
-        else:
-            model = bs_put_price(spot, r.strike, T, RISK_FREE_RATE, r.mx_iv)
+        model = (
+            bs_call_price(spot, r.strike, T, RISK_FREE_RATE, r.mx_iv)
+            if r.kind == "call"
+            else bs_put_price(spot, r.strike, T, RISK_FREE_RATE, r.mx_iv)
+        )
 
         if r.last > 0:
             err = abs(model - r.last) / max(model, r.last, 0.01)
@@ -542,7 +639,33 @@ def mx_weighted_iv(symbol, spot):
     return iv1, expiry1_str, forward_iv, forward_expiry, f"root={root}; " + " | ".join(statuses)
 
 
-def resolve(symbol):
+def apply_earnings_override(result, hist, earnings_inside):
+    if not earnings_inside:
+        return result
+
+    if result.forward_iv is not None:
+        result.iv = result.forward_iv
+        result.source = result.source + "_forward_earnings_override"
+        result.final_status = "ok; earnings override used forward IV"
+        return result
+
+    hv = annualized_hist_vol(hist)
+
+    if hv is not None:
+        result.iv = hv
+        result.source = "historical_earnings_override"
+        result.final_status = "fallback used; earnings override required but forward IV unavailable"
+        result.hv_status = "ok"
+        return result
+
+    result.iv = None
+    result.source = ""
+    result.final_status = "all methods failed; earnings override required but forward IV and HV unavailable"
+    result.hv_status = "failed"
+    return result
+
+
+def resolve(symbol, row):
     result = IVResult()
 
     try:
@@ -552,10 +675,12 @@ def resolve(symbol):
         spot, hist = None, None
         result.yf_status = f"spot lookup failed: {e}"
 
+    earnings_inside, earnings_status = earnings_between_last_close_and_next_open(row)
+
     try:
         if spot is not None and spot > 0:
             iv, expiry, fiv, fexp, status = yf_weighted_iv(symbol, spot)
-            result.yf_status = status
+            result.yf_status = status + f"; earnings={earnings_status}"
 
             if iv is not None:
                 result.iv = iv
@@ -566,15 +691,15 @@ def resolve(symbol):
                 result.final_status = "ok"
                 result.mx_status = "not attempted"
                 result.hv_status = "not attempted"
-                return result
+                return apply_earnings_override(result, hist, earnings_inside)
         else:
-            result.yf_status = "no usable yfinance spot"
+            result.yf_status = "no usable yfinance spot" + f"; earnings={earnings_status}"
     except Exception as e:
-        result.yf_status = f"yfinance failed: {e}"
+        result.yf_status = f"yfinance failed: {e}; earnings={earnings_status}"
 
     try:
         iv, expiry, fiv, fexp, status = mx_weighted_iv(symbol, spot)
-        result.mx_status = status
+        result.mx_status = status + f"; earnings={earnings_status}"
 
         if iv is not None:
             result.iv = iv
@@ -584,9 +709,9 @@ def resolve(symbol):
             result.source = "mx_weighted"
             result.final_status = "ok"
             result.hv_status = "not attempted"
-            return result
+            return apply_earnings_override(result, hist, earnings_inside)
     except Exception as e:
-        result.mx_status = f"mx failed: {e}"
+        result.mx_status = f"mx failed: {e}; earnings={earnings_status}"
 
     try:
         hv = annualized_hist_vol(hist)
@@ -626,7 +751,6 @@ def reorder_columns(df):
     ]
 
     remaining = [c for c in df.columns if c not in desired_order]
-
     return df[desired_order + remaining]
 
 
@@ -652,7 +776,7 @@ def main():
         symbol = str(raw_symbol).strip().upper()
 
         try:
-            r = resolve(symbol)
+            r = resolve(symbol, row)
         except Exception as e:
             r = IVResult(final_status=f"unexpected failure: {e}")
 
@@ -673,6 +797,13 @@ def main():
         )
 
     df = reorder_columns(df)
+
+    df = df.sort_values(
+        by="Implied Volatility",
+        ascending=False,
+        na_position="last",
+    )
+
     df.to_csv(OUTPUT_FILE, index=False)
     print(f"\nWrote {OUTPUT_FILE}")
 
