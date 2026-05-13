@@ -31,6 +31,8 @@ MAX_STRIKES_PER_SIDE = 4
 MIN_EXPIRY_QUALITY = 0.25
 MIN_WEIGHT_TO_KEEP = 1e-6
 
+MARKET_WINDOW_CACHE = {}
+
 
 @dataclass
 class OptionCandidate:
@@ -51,6 +53,15 @@ class IVResult:
     expiry: str = ""
     forward_iv: Optional[float] = None
     forward_expiry: str = ""
+    override_iv: Optional[float] = None
+    override_used: bool = False
+    override_status: str = ""
+    earnings_window_start: str = ""
+    earnings_window_end: str = ""
+    earnings_event_start: str = ""
+    earnings_event_end: str = ""
+    earnings_timing_normalized: str = ""
+    earnings_window_overlap: str = "False"
     source: str = ""
     final_status: str = ""
     yf_status: str = ""
@@ -136,10 +147,12 @@ def clean_df(path):
     if "Primary Exchange" in df.columns:
         df["Primary Exchange"] = df["Primary Exchange"].astype("object")
 
-    numeric_cols = ["Implied Volatility", "Forward Implied Volatility"]
+    numeric_cols = [
+        "Implied Volatility",
+    ]
+
     text_cols = [
         "Expiry Date",
-        "Forward Expiry Date",
         "IV Source",
         "Final Status",
         "YF Status",
@@ -210,101 +223,248 @@ def size_score(bid_size, ask_size):
 def exchange_calendar_name(primary_exchange: str) -> Optional[str]:
     x = str(primary_exchange or "").strip().upper()
 
-    if x in {"NYSE", "NEW YORK STOCK EXCHANGE", "NASDAQ", "NASDAQGS", "NASDAQGM", "NASDAQCM", "AMEX", "NYSEARCA"}:
+    if x in {
+        "NYSE",
+        "NEW YORK STOCK EXCHANGE",
+        "NASDAQ",
+        "NASDAQGS",
+        "NASDAQGM",
+        "NASDAQCM",
+        "AMEX",
+        "NYSEAMERICAN",
+        "NYSEARCA",
+    }:
         return "XNYS"
 
-    if x in {"TSX", "TORONTO", "TORONTO STOCK EXCHANGE", "TSXV", "TSX VENTURE"}:
+    if x in {
+        "TSX",
+        "TSE",
+        "TORONTO",
+        "TORONTO STOCK EXCHANGE",
+        "TSXV",
+        "TSX VENTURE",
+        "TSX VENTURE EXCHANGE",
+    }:
         return "XTSE"
 
     return None
 
 
-def get_last_close_next_open(primary_exchange: str):
+def exchange_timezone_name(primary_exchange: str) -> Optional[str]:
+    cal_name = exchange_calendar_name(primary_exchange)
+
+    if cal_name == "XNYS":
+        return "America/New_York"
+
+    if cal_name == "XTSE":
+        return "America/Toronto"
+
+    return None
+
+
+def normalize_earnings_timing(x) -> str:
+    s = str(x or "").strip().lower()
+    s = re.sub(r"\s+", " ", s)
+
+    if s == "unknown":
+        return "Unknown"
+
+    if s in {
+        "after market close",
+        "after close",
+        "amc",
+        "post-market",
+        "post market",
+    }:
+        return "After Market Close"
+
+    if s in {
+        "before market open",
+        "before open",
+        "bmo",
+        "pre-market",
+        "pre market",
+    }:
+        return "Before Market Open"
+
+    return str(x or "").strip()
+
+
+def get_overnight_market_window(primary_exchange: str):
+    """
+    Correct override window:
+
+        next_open = next market open after now
+        window_start = market close immediately before that next_open
+        window_end = next_open
+
+    The returned window timestamps are timezone-aware UTC pandas Timestamps.
+    local_tz_name is used only for constructing and displaying earnings intervals.
+    """
     if mcal is None:
-        return None, None, "pandas_market_calendars not installed"
+        return None, None, None, "pandas_market_calendars not installed"
 
     cal_name = exchange_calendar_name(primary_exchange)
-    if cal_name is None:
-        return None, None, f"unknown exchange: {primary_exchange}"
+    local_tz_name = exchange_timezone_name(primary_exchange)
+
+    if cal_name is None or local_tz_name is None:
+        return None, None, None, f"unknown exchange: {primary_exchange}"
+
+    if cal_name in MARKET_WINDOW_CACHE:
+        return MARKET_WINDOW_CACHE[cal_name]
 
     try:
         cal = mcal.get_calendar(cal_name)
         now_utc = pd.Timestamp.now(tz="UTC")
 
         sched = cal.schedule(
-            start_date=(now_utc - pd.Timedelta(days=10)).date(),
-            end_date=(now_utc + pd.Timedelta(days=10)).date(),
+            start_date=(now_utc - pd.Timedelta(days=14)).date(),
+            end_date=(now_utc + pd.Timedelta(days=21)).date(),
         )
 
-        closes = sched["market_close"][sched["market_close"] <= now_utc]
-        opens = sched["market_open"][sched["market_open"] > now_utc]
+        if sched.empty:
+            result = (None, None, None, "empty market schedule")
+            MARKET_WINDOW_CACHE[cal_name] = result
+            return result
 
-        if closes.empty or opens.empty:
-            return None, None, "could not identify last close / next open"
+        next_opens = sched["market_open"][sched["market_open"] > now_utc]
 
-        return closes.iloc[-1], opens.iloc[0], "ok"
+        if next_opens.empty:
+            result = (None, None, None, "could not identify next market open")
+            MARKET_WINDOW_CACHE[cal_name] = result
+            return result
+
+        window_end = next_opens.iloc[0]
+
+        prior_closes = sched["market_close"][sched["market_close"] < window_end]
+
+        if prior_closes.empty:
+            result = (None, None, None, "could not identify close before next market open")
+            MARKET_WINDOW_CACHE[cal_name] = result
+            return result
+
+        window_start = prior_closes.iloc[-1]
+
+        result = (window_start, window_end, local_tz_name, "ok")
+        MARKET_WINDOW_CACHE[cal_name] = result
+        return result
 
     except Exception as e:
-        return None, None, f"calendar failed: {e}"
+        result = (None, None, None, f"calendar failed: {e}")
+        MARKET_WINDOW_CACHE[cal_name] = result
+        return result
 
 
-def earnings_event_time(row, last_close, next_open):
+def build_earnings_event_interval(row, local_tz_name: str):
     if "Next Earnings Date" not in row.index or "Earnings Timing" not in row.index:
-        return None, "missing earnings columns"
+        return None, None, "", "missing earnings columns"
 
     raw_date = row.get("Next Earnings Date")
-    timing = str(row.get("Earnings Timing", "")).strip()
+    raw_timing = row.get("Earnings Timing")
+    timing = normalize_earnings_timing(raw_timing)
 
     if pd.isna(raw_date) or str(raw_date).strip() == "":
-        return None, "no earnings date"
+        return None, None, timing, "no earnings date"
 
     try:
         earnings_date = pd.to_datetime(raw_date).date()
     except Exception:
-        return None, f"bad earnings date: {raw_date}"
-
-    tz = last_close.tz
+        return None, None, timing, f"bad earnings date: {raw_date}"
 
     if timing == "After Market Close":
-        event_time = pd.Timestamp.combine(earnings_date, dt.time(16, 1)).tz_localize(tz)
+        start_time = dt.time(16, 0, 0)
+        end_time = dt.time(23, 59, 59)
 
     elif timing == "Before Market Open":
-        event_time = pd.Timestamp.combine(earnings_date, dt.time(9, 29)).tz_localize(tz)
+        start_time = dt.time(0, 0, 0)
+        end_time = dt.time(9, 30, 0)
 
     elif timing == "Unknown":
-        last_close_date = last_close.tz_convert(tz).date()
-        next_open_date = next_open.tz_convert(tz).date()
-
-        if earnings_date in {last_close_date, next_open_date}:
-            return next_open - pd.Timedelta(minutes=1), "ok; unknown timing treated as inside overnight window"
-
-        return None, "unknown timing outside overnight-window dates"
+        start_time = dt.time(0, 0, 0)
+        end_time = dt.time(23, 59, 59)
 
     else:
-        return None, f"unknown earnings timing: {timing}"
+        return None, None, timing, f"unknown earnings timing: {raw_timing}"
 
-    return event_time.tz_convert("UTC"), "ok"
+    try:
+        event_start_local = pd.Timestamp(
+            dt.datetime.combine(earnings_date, start_time)
+        ).tz_localize(local_tz_name)
+
+        event_end_local = pd.Timestamp(
+            dt.datetime.combine(earnings_date, end_time)
+        ).tz_localize(local_tz_name)
+
+        return (
+            event_start_local.tz_convert("UTC"),
+            event_end_local.tz_convert("UTC"),
+            timing,
+            "ok",
+        )
+    except Exception as e:
+        return None, None, timing, f"could not build earnings interval: {e}"
 
 
 def earnings_between_last_close_and_next_open(row):
+    """
+    Return:
+        inside: bool
+        status: str
+        debug: dict
+
+    Override condition:
+        event_start < window_end and event_end > window_start
+    """
+    debug = {
+        "Earnings Window Start": "",
+        "Earnings Window End": "",
+        "Earnings Event Start": "",
+        "Earnings Event End": "",
+        "Earnings Timing Normalized": "",
+        "Earnings Window Overlap": "False",
+    }
+
+    if "Next Earnings Date" not in row.index or "Earnings Timing" not in row.index:
+        return False, "missing earnings columns", debug
+
+    raw_date = row.get("Next Earnings Date")
+
+    if pd.isna(raw_date) or str(raw_date).strip() == "":
+        return False, "no earnings date", debug
+
     primary_exchange = row.get("Primary Exchange", "")
 
-    last_close, next_open, cal_status = get_last_close_next_open(primary_exchange)
+    window_start, window_end, local_tz_name, cal_status = get_overnight_market_window(primary_exchange)
 
-    if last_close is None or next_open is None:
-        return False, cal_status
+    if window_start is None or window_end is None or local_tz_name is None:
+        return False, cal_status, debug
 
-    event_time, event_status = earnings_event_time(row, last_close, next_open)
+    event_start, event_end, timing, event_status = build_earnings_event_interval(row, local_tz_name)
 
-    if event_time is None:
-        return False, event_status
+    debug["Earnings Window Start"] = str(window_start.tz_convert(local_tz_name))
+    debug["Earnings Window End"] = str(window_end.tz_convert(local_tz_name))
+    debug["Earnings Timing Normalized"] = timing
 
-    inside = last_close <= event_time <= next_open
+    if event_start is None or event_end is None:
+        return False, event_status, debug
 
-    return inside, (
-        f"{'inside' if inside else 'outside'} overnight window; "
-        f"last_close={last_close}; next_open={next_open}; event={event_time}; timing={event_status}"
+    debug["Earnings Event Start"] = str(event_start.tz_convert(local_tz_name))
+    debug["Earnings Event End"] = str(event_end.tz_convert(local_tz_name))
+
+    overlaps = event_start < window_end and event_end > window_start
+    debug["Earnings Window Overlap"] = str(bool(overlaps))
+
+    status = (
+        f"{'inside' if overlaps else 'outside'} overnight window; "
+        f"window_start={debug['Earnings Window Start']}; "
+        f"window_end={debug['Earnings Window End']}; "
+        f"event_start={debug['Earnings Event Start']}; "
+        f"event_end={debug['Earnings Event End']}; "
+        f"timing={timing}; "
+        f"event_status={event_status}"
     )
+
+    return overlaps, status, debug
 
 
 def get_yf_expiries(ticker):
@@ -640,28 +800,53 @@ def mx_weighted_iv(symbol, spot):
 
 
 def apply_earnings_override(result, hist, earnings_inside):
+    result.override_iv = None
+    result.override_used = False
+    result.override_status = "no earnings override"
+
     if not earnings_inside:
         return result
 
+    result.override_used = True
+
     if result.forward_iv is not None:
-        result.iv = result.forward_iv
+        result.override_iv = result.forward_iv
         result.source = result.source + "_forward_earnings_override"
-        result.final_status = "ok; earnings override used forward IV"
+        result.override_status = "earnings override used forward IV"
         return result
 
     hv = annualized_hist_vol(hist)
 
     if hv is not None:
-        result.iv = hv
+        result.override_iv = hv
         result.source = "historical_earnings_override"
-        result.final_status = "fallback used; earnings override required but forward IV unavailable"
-        result.hv_status = "ok"
+        result.override_status = (
+            "earnings override used historical volatility because forward IV unavailable"
+        )
+
+        if not result.hv_status or result.hv_status == "not attempted":
+            result.hv_status = "ok"
+
         return result
 
-    result.iv = None
-    result.source = ""
-    result.final_status = "all methods failed; earnings override required but forward IV and HV unavailable"
-    result.hv_status = "failed"
+    result.override_iv = None
+    result.override_status = (
+        "earnings override required but forward IV and historical volatility unavailable"
+    )
+
+    if not result.hv_status or result.hv_status == "not attempted":
+        result.hv_status = "failed"
+
+    return result
+
+
+def attach_earnings_debug(result, earnings_debug):
+    result.earnings_window_start = earnings_debug.get("Earnings Window Start", "")
+    result.earnings_window_end = earnings_debug.get("Earnings Window End", "")
+    result.earnings_event_start = earnings_debug.get("Earnings Event Start", "")
+    result.earnings_event_end = earnings_debug.get("Earnings Event End", "")
+    result.earnings_timing_normalized = earnings_debug.get("Earnings Timing Normalized", "")
+    result.earnings_window_overlap = earnings_debug.get("Earnings Window Overlap", "False")
     return result
 
 
@@ -675,7 +860,21 @@ def resolve(symbol, row):
         spot, hist = None, None
         result.yf_status = f"spot lookup failed: {e}"
 
-    earnings_inside, earnings_status = earnings_between_last_close_and_next_open(row)
+    if "Next Earnings Date" in row.index and "Earnings Timing" in row.index:
+        earnings_inside, earnings_status, earnings_debug = earnings_between_last_close_and_next_open(row)
+    else:
+        earnings_inside = False
+        earnings_status = "no earnings input file"
+        earnings_debug = {
+            "Earnings Window Start": "",
+            "Earnings Window End": "",
+            "Earnings Event Start": "",
+            "Earnings Event End": "",
+            "Earnings Timing Normalized": "",
+            "Earnings Window Overlap": "False",
+        }
+
+    attach_earnings_debug(result, earnings_debug)
 
     try:
         if spot is not None and spot > 0:
@@ -724,25 +923,20 @@ def resolve(symbol, row):
             result.forward_expiry = ""
             result.source = "historical"
             result.final_status = "fallback used"
-            return result
+            return apply_earnings_override(result, hist, earnings_inside)
     except Exception as e:
         result.hv_status = f"hv failed: {e}"
 
     result.final_status = "all methods failed"
-    return result
+    return apply_earnings_override(result, hist, earnings_inside)
 
 
 def reorder_columns(df):
-    if "Primary Exchange" in df.columns:
-        df = df.drop(columns=["Primary Exchange"])
-
     desired_order = [
         "Name",
         "Symbol",
         "Implied Volatility",
-        "Forward Implied Volatility",
         "Expiry Date",
-        "Forward Expiry Date",
         "IV Source",
         "Final Status",
         "YF Status",
@@ -750,8 +944,11 @@ def reorder_columns(df):
         "HV Status",
     ]
 
-    remaining = [c for c in df.columns if c not in desired_order]
-    return df[desired_order + remaining]
+    for col in desired_order:
+        if col not in df.columns:
+            df[col] = ""
+
+    return df[desired_order]
 
 
 def main():
@@ -763,8 +960,17 @@ def main():
         if pd.isna(raw_symbol) or str(raw_symbol).strip() == "":
             df.at[i, "Implied Volatility"] = np.nan
             df.at[i, "Forward Implied Volatility"] = np.nan
+            df.at[i, "Earnings Override Volatility"] = np.nan
             df.at[i, "Expiry Date"] = ""
             df.at[i, "Forward Expiry Date"] = ""
+            df.at[i, "Earnings Override Used"] = "False"
+            df.at[i, "Earnings Override Status"] = "blank symbol"
+            df.at[i, "Earnings Window Start"] = ""
+            df.at[i, "Earnings Window End"] = ""
+            df.at[i, "Earnings Event Start"] = ""
+            df.at[i, "Earnings Event End"] = ""
+            df.at[i, "Earnings Timing Normalized"] = ""
+            df.at[i, "Earnings Window Overlap"] = "False"
             df.at[i, "IV Source"] = ""
             df.at[i, "Final Status"] = "blank symbol"
             df.at[i, "YF Status"] = "not attempted"
@@ -780,10 +986,10 @@ def main():
         except Exception as e:
             r = IVResult(final_status=f"unexpected failure: {e}")
 
-        df.at[i, "Implied Volatility"] = r.iv if r.iv is not None else np.nan
-        df.at[i, "Forward Implied Volatility"] = r.forward_iv if r.forward_iv is not None else np.nan
+        output_iv = r.override_iv if r.override_iv is not None else r.iv
+
+        df.at[i, "Implied Volatility"] = output_iv if output_iv is not None else np.nan
         df.at[i, "Expiry Date"] = r.expiry
-        df.at[i, "Forward Expiry Date"] = r.forward_expiry
         df.at[i, "IV Source"] = r.source
         df.at[i, "Final Status"] = r.final_status
         df.at[i, "YF Status"] = r.yf_status
@@ -793,6 +999,8 @@ def main():
         print(
             f"{symbol}: IV={r.iv} expiry={r.expiry} "
             f"forward_IV={r.forward_iv} forward_expiry={r.forward_expiry} "
+            f"override_IV={r.override_iv} override_used={r.override_used} "
+            f"overlap={r.earnings_window_overlap} "
             f"source={r.source} status={r.final_status}"
         )
 
