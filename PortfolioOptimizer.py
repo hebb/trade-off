@@ -1,22 +1,46 @@
 #!/usr/bin/env python3
 """
-CombinedContestOptimizer.py
+PortfolioOptimizer.py
 
-Single contest optimiser with selectable objective:
+Contest portfolio optimiser for the Globe and Mail Trade Off contest.
 
+Configuration:
+  - Normal defaults may be read from config.yaml, or from another file supplied
+    with --config.
+  - Command-line arguments override config-file values.
+  - The anchor normally comes from config.yaml, but --anchor overrides it.
+
+Selectable objectives:
   --objective te       minimise tracking error to a win-probability-weighted benchmark
+  --objective max_te   maximise tracking error to the same benchmark
   --objective win      maximise the anchor's simulated probability of finishing first
-  --objective vol      maximise portfolio volatility
-  --objective current  use the anchor portfolio from Leaderboard.csv
+  --objective vol      maximise absolute portfolio volatility
+  --objective current  use the anchor portfolio from Leaderboard.csv, if present
 
-Key points:
-  - Default correlation file: correlation_matrix.csv
-  - CorrelationMatrixDaily.csv and CorrelationMatrixMonthly.csv are not used.
-  - --exclude applies to every optimisation objective.
-  - --forced applies to every optimisation objective, e.g. --forced "AAPL=25,NVDA=10".
-  - The weighted benchmark is calculated only for --objective te.
+Inputs and model choices:
+  - Default correlation file: correlation_matrix.csv.
+  - Volatility sources are selected with --wp_vol_source, --opt_vol_source, and
+    --sim_vol_source.  The optimisation volatility source is used for te,
+    max_te, win, and vol.
+  - The weighted benchmark is calculated only for te and max_te.
+
+Constraints:
   - Contest rules: at least 5 stocks; each stock 5%-25%; 1% increments;
-    cash allowed up to --max_cash for TE/WIN/current validation; no shorting.
+    cash allowed up to --max_cash; no shorting.
+  - --exclude applies to te, max_te, win, and vol.
+  - --forced applies to te, max_te, win, and vol, e.g. --forced "AAPL=25,NVDA=10".
+  - Forced holdings are allowed even when the same ticker appears in --exclude.
+
+Simulation:
+  - Final Monte Carlo reporting uses --sim_vol_source.
+  - When the anchor is present in Leaderboard.csv, the selected portfolio is
+    inserted and finish probabilities are reported after optimisation, including
+    for vol and max_te.
+  - If the anchor is absent, objectives that can still be evaluated do not fail
+    solely for that reason; anchor-specific final reporting is skipped when the
+    selected portfolio cannot be inserted.
+  - Portfolio terminal returns are calculated by weighting simulated terminal
+    asset gross returns, not by exponentiating weighted log returns.
 """
 
 from __future__ import annotations
@@ -1398,7 +1422,7 @@ def run_all(
             anchor_port = None
             print(f"\nAnchor {anchor_name!r} was not found in Leaderboard.csv; simulating the current leaderboard as-is.")
 
-    elif objective == "te":
+    elif objective in {"te", "max_te"}:
         players_ex = [p for p in players if p != anchor_name]
         values_ex = {p: values[p] for p in players_ex}
         universe_ex = make_universe_from_players(players_ex, ports)
@@ -1431,7 +1455,14 @@ def run_all(
             te = float(math.sqrt(max(d @ Sigma_ann_te @ d, 0.0)))
             return te, te
 
-        print(f"\nOptimising for minimum tracking error using {opt_vol_source.upper()}-TERM vols.")
+        maximise_te = objective == "max_te"
+        if maximise_te:
+            initial_bias = {t: opt_vols_for_universe.get(t, 0.0) for t in tickers_for_anchor}
+            print(f"\nOptimising for maximum tracking error using {opt_vol_source.upper()}-TERM vols.")
+        else:
+            initial_bias = bench
+            print(f"\nOptimising for minimum tracking error using {opt_vol_source.upper()}-TERM vols.")
+
         anchor_port = cross_entropy_optimise(
             rng=np.random.default_rng(seed),
             tickers=[t for t in tickers_for_anchor if t != "CASH"],
@@ -1439,16 +1470,17 @@ def run_all(
             forced=forced,
             objective_fn=te_obj,
             u_index=u_index,
-            initial_bias=bench,
+            initial_bias=initial_bias,
             n_rounds=rounds,
             samples_per_round=samples,
-            maximise=False,
+            maximise=maximise_te,
             label="TE",
             polish_steps=1200,
         )
         te_vs_bench = tracking_error_portfolios(anchor_port, bench, corr_u_te, vol_vec_te)
         print(f"\nTE(selected {anchor_name}, benchmark) {opt_vol_source.upper()}-TERM vols (ann.): {te_vs_bench:.6f}")
-        print(f"\nTracking-error-minimising portfolio for {anchor_name} (contest-legal, cash capped):")
+        portfolio_label = "Tracking-error-maximising" if maximise_te else "Tracking-error-minimising"
+        print(f"\n{portfolio_label} portfolio for {anchor_name} (contest-legal, cash capped):")
         for t, wt in sorted(anchor_port.items(), key=lambda x: x[1], reverse=True):
             print(f"  {t:8s}  {wt * 100:6.2f}%")
 
@@ -1489,7 +1521,7 @@ def run_all(
             print(f"  {t:8s}  {wt * 100:6.2f}%")
 
     else:
-        raise ValueError("--objective must be 'te', 'win', 'vol', or 'current'.")
+        raise ValueError("--objective must be 'te', 'max_te', 'win', 'vol', or 'current'.")
 
     if anchor_port is not None and not is_legal_portfolio(anchor_port, constraints, forced):
         raise RuntimeError(f"Internal error: chosen {anchor_name} portfolio violates constraints.")
@@ -1506,7 +1538,7 @@ def run_all(
 
     if anchor_port is not None:
         if anchor_name not in players_sim:
-            if objective in {"te", "win"}:
+            if objective in {"te", "max_te", "win"}:
                 players_sim.append(anchor_name)
                 values_sim[anchor_name] = selected_start_value()
                 print(f"\nAdded synthetic entrant {anchor_name!r} for final simulation with starting value {values_sim[anchor_name]:.2f}.")
@@ -1609,7 +1641,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Combined contest optimiser.")
     parser.add_argument("--config", type=str, default=None, help="Configuration file. Default: config.yaml if it exists.")
 
-    parser.add_argument("--objective", choices=["te", "win", "vol", "current"], default=None, help="Portfolio objective.")
+    parser.add_argument("--objective", choices=["te", "max_te", "win", "vol", "current"], default=None, help="Portfolio objective.")
     parser.add_argument("--anchor", type=str, default=None, help="Selected portfolio name. Overrides the config file.")
     parser.add_argument("--selected-value", type=float, default=None, help="Starting value for the selected portfolio if it is not in the leaderboard.")
     parser.add_argument("--stocklist", type=str, default=None, help="CSV containing Symbol and optional Alternative Symbol columns.")
@@ -1622,18 +1654,18 @@ if __name__ == "__main__":
     parser.add_argument("--sims", type=int, default=None, help="Number of Monte Carlo simulations for final reporting.")
     parser.add_argument("--seed", type=int, default=None, help="RNG seed.")
 
-    parser.add_argument("--wp_vol_source", choices=["short", "medium"], default=None, help="Vols used only when --objective te needs to compute win probabilities.")
-    parser.add_argument("--opt_vol_source", choices=["short", "medium"], default=None, help="Vols used for TE, WIN, or VOL optimisation.")
+    parser.add_argument("--wp_vol_source", choices=["short", "medium"], default=None, help="Vols used only when --objective te or max_te needs to compute win probabilities.")
+    parser.add_argument("--opt_vol_source", choices=["short", "medium"], default=None, help="Vols used for TE, MAX_TE, WIN, or VOL optimisation.")
     parser.add_argument("--sim_vol_source", choices=["short", "medium"], default=None, help="Vols used for final full contest simulation.")
 
     parser.add_argument("--inner_sims", type=int, default=None, help="Inner simulations for --objective win.")
-    parser.add_argument("--rounds", type=int, default=None, help="Optimisation rounds for --objective te or win.")
-    parser.add_argument("--samples", type=int, default=None, help="Samples per round for --objective te or win.")
+    parser.add_argument("--rounds", type=int, default=None, help="Optimisation rounds for --objective te, max_te, or win.")
+    parser.add_argument("--samples", type=int, default=None, help="Samples per round for --objective te, max_te, or win.")
 
     parser.add_argument("--exclude", type=str, default=None, help="Comma-separated tickers to exclude from optimisation universe.")
     parser.add_argument("--forced", type=str, default=None, help='Forced holdings, e.g. "AAPL=25,NVDA=15,SHOP=10".')
     parser.add_argument("--max_cash", type=int, default=None, help="Maximum CASH percent allowed in anchor portfolio.")
-    parser.add_argument("--winprob-file", type=str, default=None, help="Win-probability CSV used/created only by --objective te.")
+    parser.add_argument("--winprob-file", type=str, default=None, help="Win-probability CSV used/created only by --objective te or max_te.")
 
     args = parser.parse_args()
 
@@ -1657,7 +1689,7 @@ if __name__ == "__main__":
     vol_file2 = str(choose(args.vol_file2, config, "files", "vol_medium_csv", "Volatilities2.csv"))
     winprob_file = str(choose(args.winprob_file, config, "files", "winprob_path", "WinProbabilities_excl_anchor.csv"))
 
-    days_arg = choose(args.days, config, "run", "days", None)
+    days_arg = args.days
     days = get_days_remaining(None if days_arg is None else int(days_arg))
     sims = int(choose(args.sims, config, "final_simulation", "sims", 400_000))
     seed = int(choose(args.seed, config, "final_simulation", "seed", 0))

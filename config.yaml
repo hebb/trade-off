@@ -24,6 +24,5 @@ final_simulation:
 run:
   objective: te
   anchor: AndrewHebb
-  days: 28
   exclude: ""
   forced: ""
