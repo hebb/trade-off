@@ -13,7 +13,7 @@ Configuration:
 Selectable objectives:
   --objective te         minimise tracking error to a win-probability-weighted benchmark
   --objective max_te     maximise tracking error to the same benchmark
-  --objective factor_te  maximise tracking volatility relative to the largest leaderboard factor
+  --objective factor_te  maximise or minimise tracking volatility relative to a leaderboard factor
   --objective win        maximise the anchor's simulated probability of finishing first
   --objective vol        maximise absolute portfolio volatility
   --objective current    use the anchor portfolio from Leaderboard.csv, if present
@@ -24,9 +24,11 @@ Inputs and model choices:
     --sim_vol_source.  The optimisation volatility source is used for te,
     max_te, factor_te, win, and vol.
   - The weighted benchmark is calculated only for te and max_te.
-  - The largest leaderboard factor is calculated only for factor_te, using the
-    first right singular vector of current non-anchor leaderboard portfolio
-    weights, with negative loadings clipped and the result normalized.
+  - Leaderboard factors are calculated only for factor_te, using a selected
+    right singular vector of current non-anchor leaderboard portfolio weights.
+    --factor-index chooses the 1-based SVD factor rank.  Absolute loadings are
+    normalized into a long-only target portfolio.  --factor-te-direction chooses
+    whether to maximise or minimise tracking error versus that factor.
 
 Constraints:
   - Contest rules: at least 5 stocks; each stock 5%-25%; 1% increments;
@@ -553,16 +555,18 @@ def build_weighted_benchmark(players: List[str], ports: Dict[str, Dict[str, floa
     return bench
 
 
-def build_largest_leaderboard_factor(players: List[str], ports: Dict[str, Dict[str, float]]) -> Dict[str, float]:
-    """Build a long-only proxy for the largest common leaderboard factor.
+def build_leaderboard_factor(players: List[str], ports: Dict[str, Dict[str, float]], factor_index: int) -> Dict[str, float]:
+    """Build a long-only proxy for a selected leaderboard SVD factor.
 
     The input matrix is player portfolio weights by ticker, excluding CASH.
-    Using the uncentred first right singular vector captures the largest common
-    holding pattern rather than a contrast between two centred clusters.  The
-    sign of an SVD vector is arbitrary, so it is flipped to have positive total
-    loading.  Negative residual loadings are clipped to zero and the result is
-    normalized to a 100% factor portfolio.
+    Using uncentred right singular vectors captures common holding patterns.
+    The requested factor index is 1-based.  Because an SVD vector's sign is
+    arbitrary, absolute loadings are used and normalized to a 100% factor
+    portfolio.
     """
+    if factor_index < 1:
+        raise ValueError("--factor-index must be a positive integer.")
+
     tickers = sorted({t for p in players for t in ports.get(p, {}) if t != "CASH"})
     if len(players) < 1 or len(tickers) < 1:
         raise ValueError("Cannot build a leaderboard factor without at least one non-cash holding.")
@@ -578,17 +582,16 @@ def build_largest_leaderboard_factor(players: List[str], ports: Dict[str, Dict[s
         raise ValueError("Cannot build a leaderboard factor because all leaderboard holdings are cash or unusable.")
 
     _, _, vt = np.linalg.svd(weights, full_matrices=False)
-    loadings = vt[0].astype(float)
-    if loadings.sum() < 0:
-        loadings = -loadings
+    if factor_index > vt.shape[0]:
+        raise ValueError(
+            f"--factor-index {factor_index} is unavailable; leaderboard matrix has only {vt.shape[0]} SVD factor(s)."
+        )
 
-    positive = np.maximum(loadings, 0.0)
-    if positive.sum() <= 1e-12:
-        positive = np.abs(loadings)
-    if positive.sum() <= 1e-12:
-        raise ValueError("Cannot build a usable largest factor from the leaderboard portfolio matrix.")
+    loadings = np.abs(vt[factor_index - 1].astype(float))
+    if loadings.sum() <= 1e-12:
+        raise ValueError(f"Cannot build a usable leaderboard factor {factor_index} from the portfolio matrix.")
 
-    factor_weights = positive / positive.sum()
+    factor_weights = loadings / loadings.sum()
     return {t: float(w) for t, w in zip(tickers, factor_weights) if float(w) > 1e-10}
 
 
@@ -1383,6 +1386,8 @@ def run_all(
     max_cash: int,
     anchor_name: str,
     stocklist_csv: str,
+    factor_index: int = 1,
+    factor_te_direction: str = "max",
     selected_value: Optional[float] = None,
 ) -> None:
     symbol_alias_map = load_symbol_alias_map(stocklist_csv)
@@ -1531,19 +1536,20 @@ def run_all(
         players_factor = [p for p in players if p != anchor_name]
         if not players_factor:
             players_factor = list(players)
-        factor = build_largest_leaderboard_factor(players_factor, ports)
+        factor = build_leaderboard_factor(players_factor, ports, factor_index)
         factor = filter_portfolio_to_corr(factor, corr)
         factor_sum = sum(factor.values())
         if factor_sum <= 0:
-            raise ValueError("The largest leaderboard factor has no usable non-cash correlation tickers.")
+            raise ValueError(f"Leaderboard factor {factor_index} has no usable non-cash correlation tickers.")
         for k in list(factor.keys()):
             factor[k] /= factor_sum
 
+        factor_filename = f"leaderboard_factor_{factor_index}.csv"
         pd.DataFrame(
             [{"Ticker": k, "Weight": v} for k, v in sorted(factor.items(), key=lambda x: x[1], reverse=True)]
-        ).to_csv("leaderboard_largest_factor.csv", index=False)
-        print("Wrote: leaderboard_largest_factor.csv")
-        print("\nLargest leaderboard factor, top holdings:")
+        ).to_csv(factor_filename, index=False)
+        print(f"Wrote: {factor_filename}")
+        print(f"\nLeaderboard factor {factor_index}, top holdings:")
         for t, wt in sorted(factor.items(), key=lambda x: x[1], reverse=True)[:12]:
             print(f"  {t:8s}  {wt * 100:6.2f}%")
 
@@ -1558,8 +1564,14 @@ def run_all(
             factor_te = float(math.sqrt(max(diff @ Sigma_ann_factor @ diff, 0.0)))
             return factor_te, factor_te
 
-        vol_bias = {t: opt_vols_for_universe.get(t, 0.0) for t in tickers_for_anchor}
-        print(f"\nOptimising for maximum tracking volatility versus the largest leaderboard factor using {opt_vol_source.upper()}-TERM vols.")
+        maximise_factor_te = factor_te_direction == "max"
+        if maximise_factor_te:
+            initial_bias = {t: opt_vols_for_universe.get(t, 0.0) for t in tickers_for_anchor}
+            direction_label = "maximum"
+        else:
+            initial_bias = factor
+            direction_label = "minimum"
+        print(f"\nOptimising for {direction_label} tracking volatility versus leaderboard factor {factor_index} using {opt_vol_source.upper()}-TERM vols.")
         anchor_port = cross_entropy_optimise(
             rng=np.random.default_rng(seed),
             tickers=[t for t in tickers_for_anchor if t != "CASH"],
@@ -1567,16 +1579,17 @@ def run_all(
             forced=forced,
             objective_fn=factor_te_obj,
             u_index=u_index,
-            initial_bias=vol_bias,
+            initial_bias=initial_bias,
             n_rounds=rounds,
             samples_per_round=samples,
-            maximise=True,
+            maximise=maximise_factor_te,
             label="FactorTE",
             polish_steps=1200,
         )
         factor_te = tracking_error_portfolios(anchor_port, factor, corr_u_factor, vol_vec_factor)
-        print(f"\nTE(selected {anchor_name}, largest factor) {opt_vol_source.upper()}-TERM vols (ann.): {factor_te:.6f}")
-        print(f"\nLargest-factor-relative-volatility-maximising portfolio for {anchor_name} (contest-legal, cash capped):")
+        print(f"\nTE(selected {anchor_name}, leaderboard factor {factor_index}) {opt_vol_source.upper()}-TERM vols (ann.): {factor_te:.6f}")
+        portfolio_label = "Factor-relative-volatility-maximising" if maximise_factor_te else "Factor-relative-volatility-minimising"
+        print(f"\n{portfolio_label} portfolio for {anchor_name} versus leaderboard factor {factor_index} (contest-legal, cash capped):")
         for t, wt in sorted(anchor_port.items(), key=lambda x: x[1], reverse=True):
             print(f"  {t:8s}  {wt * 100:6.2f}%")
 
@@ -1757,6 +1770,8 @@ if __name__ == "__main__":
     parser.add_argument("--inner_sims", type=int, default=None, help="Inner simulations for --objective win.")
     parser.add_argument("--rounds", type=int, default=None, help="Optimisation rounds for --objective te, max_te, factor_te, or win.")
     parser.add_argument("--samples", type=int, default=None, help="Samples per round for --objective te, max_te, factor_te, or win.")
+    parser.add_argument("--factor-index", type=int, default=None, help="1-based leaderboard SVD factor rank used by --objective factor_te.")
+    parser.add_argument("--factor-te-direction", choices=["max", "min"], default=None, help="Whether --objective factor_te maximises or minimises tracking error versus the selected factor.")
 
     parser.add_argument("--exclude", type=str, default=None, help="Comma-separated tickers to exclude from optimisation universe.")
     parser.add_argument("--forced", type=str, default=None, help='Forced holdings, e.g. "AAPL=25,NVDA=15,SHOP=10".')
@@ -1797,6 +1812,8 @@ if __name__ == "__main__":
     inner_sims = int(choose(args.inner_sims, config, "win_objective", "inner_sims", 12_000))
     rounds = int(choose(args.rounds, config, "win_objective", "rounds", 8))
     samples = int(choose(args.samples, config, "win_objective", "samples", 450))
+    factor_index = int(choose(args.factor_index, config, "run", "factor_index", 1))
+    factor_te_direction = str(choose(args.factor_te_direction, config, "run", "factor_te_direction", "max")).strip().lower()
 
     exclude = str(choose(args.exclude, config, "run", "exclude", ""))
     forced = str(choose(args.forced, config, "run", "forced", ""))
@@ -1810,6 +1827,10 @@ if __name__ == "__main__":
     ]:
         if value not in valid_vol_sources:
             raise ValueError(f"{label} must be one of {sorted(valid_vol_sources)}; got {value!r}.")
+    if factor_index < 1:
+        raise ValueError("--factor-index must be a positive integer.")
+    if factor_te_direction not in {"max", "min"}:
+        raise ValueError(f"factor_te_direction must be one of ['max', 'min']; got {factor_te_direction!r}.")
 
     print(
         f"Objective: {objective} | anchor={anchor} | corr={corr_file} | "
@@ -1839,5 +1860,7 @@ if __name__ == "__main__":
         max_cash=max_cash,
         anchor_name=anchor,
         stocklist_csv=stocklist,
+        factor_index=factor_index,
+        factor_te_direction=factor_te_direction,
         selected_value=selected_value,
     )
