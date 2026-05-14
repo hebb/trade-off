@@ -30,8 +30,14 @@ REQUEST_TIMEOUT = 20
 MAX_STRIKES_PER_SIDE = 4
 MIN_EXPIRY_QUALITY = 0.25
 MIN_WEIGHT_TO_KEEP = 1e-6
+TRADING_DAYS_PER_YEAR = 252
 
-MARKET_WINDOW_CACHE = {}
+MARKET_SCHEDULE_CACHE = {}
+
+EARNINGS_NONE = "none"
+EARNINGS_IMMEDIATE_OVERNIGHT = "immediate_overnight"
+EARNINGS_OPEN_TO_OPEN = "open_to_open"
+EARNINGS_FOLLOWING_OPEN_TO_EXPIRY = "following_open_to_expiry"
 
 
 @dataclass
@@ -45,6 +51,17 @@ class OptionCandidate:
     kind: str
     bid_size: float = 0.0
     ask_size: float = 0.0
+
+
+@dataclass
+class MarketContext:
+    cal_name: str
+    local_tz_name: str
+    schedule: pd.DataFrame
+    now_utc: pd.Timestamp
+    previous_close: pd.Timestamp
+    next_open: pd.Timestamp
+    following_open: pd.Timestamp
 
 
 @dataclass
@@ -99,16 +116,21 @@ def implied_vol(price, S, K, T, r, is_call):
         return None
 
 
-def year_fraction(expiry_date: dt.date) -> float:
-    now = dt.datetime.now()
-    expiry_dt = dt.datetime.combine(expiry_date, dt.time(hour=16, minute=0))
-    seconds = (expiry_dt - now).total_seconds()
-    return max(seconds / (365.25 * 24 * 60 * 60), 1e-6)
+def trading_year_fraction(expiry_date: dt.date, primary_exchange: str, market_context=None) -> Optional[float]:
+    trading_days = trading_sessions_to_expiry(expiry_date, primary_exchange, market_context=market_context)
+
+    if trading_days is None or trading_days <= 0:
+        return None
+
+    return trading_days / TRADING_DAYS_PER_YEAR
 
 
-def forward_iv_from_two_expiries(iv1, expiry1, iv2, expiry2):
-    t1 = year_fraction(expiry1)
-    t2 = year_fraction(expiry2)
+def forward_iv_from_two_expiries(iv1, expiry1, iv2, expiry2, primary_exchange: str, market_context=None):
+    t1 = trading_year_fraction(expiry1, primary_exchange, market_context=market_context)
+    t2 = trading_year_fraction(expiry2, primary_exchange, market_context=market_context)
+
+    if t1 is None or t2 is None:
+        return None
 
     if t2 <= t1:
         return None
@@ -233,6 +255,16 @@ def exchange_calendar_name(primary_exchange: str) -> Optional[str]:
         "AMEX",
         "NYSEAMERICAN",
         "NYSEARCA",
+        "ARCA",
+        "BATS",
+        "CBOE",
+        "CBOE BZX",
+        "CBOE BZX EXCHANGE",
+        "CBOE BYX",
+        "CBOE EDGA",
+        "CBOE EDGX",
+        "CBOE GLOBAL MARKETS",
+        "IEX",
     }:
         return "XNYS"
 
@@ -287,72 +319,144 @@ def normalize_earnings_timing(x) -> str:
     }:
         return "Before Market Open"
 
+    if s in {
+        "during market hours",
+        "during trading hours",
+        "during market",
+        "market hours",
+        "trading hours",
+        "dmh",
+    }:
+        return "During Trading Hours"
+
     return str(x or "").strip()
 
 
-def get_overnight_market_window(primary_exchange: str):
+def to_utc_timestamp(value=None) -> pd.Timestamp:
+    ts = pd.Timestamp.now(tz="UTC") if value is None else pd.Timestamp(value)
+
+    if ts.tzinfo is None:
+        return ts.tz_localize("UTC")
+
+    return ts.tz_convert("UTC")
+
+
+def empty_earnings_debug():
+    return {
+        "Earnings Window Start": "",
+        "Earnings Window End": "",
+        "Earnings Event Start": "",
+        "Earnings Event End": "",
+        "Earnings Timing Normalized": "",
+        "Earnings Window Overlap": "False",
+    }
+
+
+def get_exchange_schedule(cal_name: str, start_date, end_date):
+    key = (cal_name, str(start_date), str(end_date))
+
+    if key in MARKET_SCHEDULE_CACHE:
+        return MARKET_SCHEDULE_CACHE[key]
+
+    cal = mcal.get_calendar(cal_name)
+    sched = cal.schedule(start_date=start_date, end_date=end_date)
+    MARKET_SCHEDULE_CACHE[key] = sched
+    return sched
+
+
+def get_market_context(primary_exchange: str, now_utc=None):
     """
-    Correct override window:
+    Build the exchange-session boundaries used for trading-day IV math and
+    earnings-window classification.
 
-        next_open = next market open after now
-        window_start = market close immediately before that next_open
-        window_end = next_open
-
-    The returned window timestamps are timezone-aware UTC pandas Timestamps.
-    local_tz_name is used only for constructing and displaying earnings intervals.
+    The returned timestamps are timezone-aware UTC pandas Timestamps.
     """
     if mcal is None:
-        return None, None, None, "pandas_market_calendars not installed"
+        return None, "pandas_market_calendars not installed"
 
     cal_name = exchange_calendar_name(primary_exchange)
     local_tz_name = exchange_timezone_name(primary_exchange)
 
     if cal_name is None or local_tz_name is None:
-        return None, None, None, f"unknown exchange: {primary_exchange}"
-
-    if cal_name in MARKET_WINDOW_CACHE:
-        return MARKET_WINDOW_CACHE[cal_name]
+        return None, f"unknown exchange: {primary_exchange}"
 
     try:
-        cal = mcal.get_calendar(cal_name)
-        now_utc = pd.Timestamp.now(tz="UTC")
+        now_utc = to_utc_timestamp(now_utc)
 
-        sched = cal.schedule(
+        sched = get_exchange_schedule(
+            cal_name,
             start_date=(now_utc - pd.Timedelta(days=14)).date(),
-            end_date=(now_utc + pd.Timedelta(days=21)).date(),
+            end_date=(now_utc + pd.Timedelta(days=450)).date(),
         )
 
         if sched.empty:
-            result = (None, None, None, "empty market schedule")
-            MARKET_WINDOW_CACHE[cal_name] = result
-            return result
+            return None, "empty market schedule"
 
         next_opens = sched["market_open"][sched["market_open"] > now_utc]
 
-        if next_opens.empty:
-            result = (None, None, None, "could not identify next market open")
-            MARKET_WINDOW_CACHE[cal_name] = result
-            return result
+        if len(next_opens) < 2:
+            return None, "could not identify next and following market opens"
 
-        window_end = next_opens.iloc[0]
+        next_open = next_opens.iloc[0]
+        following_open = next_opens.iloc[1]
 
-        prior_closes = sched["market_close"][sched["market_close"] < window_end]
+        prior_closes = sched["market_close"][sched["market_close"] < next_open]
 
         if prior_closes.empty:
-            result = (None, None, None, "could not identify close before next market open")
-            MARKET_WINDOW_CACHE[cal_name] = result
-            return result
+            return None, "could not identify close before next market open"
 
-        window_start = prior_closes.iloc[-1]
+        previous_close = prior_closes.iloc[-1]
 
-        result = (window_start, window_end, local_tz_name, "ok")
-        MARKET_WINDOW_CACHE[cal_name] = result
-        return result
+        return (
+            MarketContext(
+                cal_name=cal_name,
+                local_tz_name=local_tz_name,
+                schedule=sched,
+                now_utc=now_utc,
+                previous_close=previous_close,
+                next_open=next_open,
+                following_open=following_open,
+            ),
+            "ok",
+        )
 
     except Exception as e:
-        result = (None, None, None, f"calendar failed: {e}")
-        MARKET_WINDOW_CACHE[cal_name] = result
-        return result
+        return None, f"calendar failed: {e}"
+
+
+def expiry_close_for_context(expiry_date: dt.date, market_context: MarketContext) -> Optional[pd.Timestamp]:
+    expiry_key = pd.Timestamp(expiry_date)
+
+    if expiry_key not in market_context.schedule.index:
+        return None
+
+    return market_context.schedule.loc[expiry_key, "market_close"]
+
+
+def is_usable_expiry(expiry_date: dt.date, market_context: MarketContext) -> bool:
+    expiry_close = expiry_close_for_context(expiry_date, market_context)
+    return expiry_close is not None and expiry_close > market_context.following_open
+
+
+def trading_sessions_to_expiry(expiry_date: dt.date, primary_exchange: str, market_context=None) -> Optional[int]:
+    market_context = market_context or get_market_context(primary_exchange)[0]
+
+    if market_context is None:
+        return None
+
+    expiry_close = expiry_close_for_context(expiry_date, market_context)
+
+    if expiry_close is None or expiry_close <= market_context.now_utc:
+        return None
+
+    closes = market_context.schedule["market_close"]
+    count = int(((closes > market_context.now_utc) & (closes <= expiry_close)).sum())
+
+    return count if count > 0 else None
+
+
+def overlaps(a_start, a_end, b_start, b_end) -> bool:
+    return a_start < b_end and a_end > b_start
 
 
 def build_earnings_event_interval(row, local_tz_name: str):
@@ -378,6 +482,10 @@ def build_earnings_event_interval(row, local_tz_name: str):
     elif timing == "Before Market Open":
         start_time = dt.time(0, 0, 0)
         end_time = dt.time(9, 30, 0)
+
+    elif timing == "During Trading Hours":
+        start_time = dt.time(9, 30, 0)
+        end_time = dt.time(16, 0, 0)
 
     elif timing == "Unknown":
         start_time = dt.time(0, 0, 0)
@@ -405,70 +513,119 @@ def build_earnings_event_interval(row, local_tz_name: str):
         return None, None, timing, f"could not build earnings interval: {e}"
 
 
-def earnings_between_last_close_and_next_open(row):
+def classify_earnings_override(row, primary_exchange: str, expiry_date, market_context=None):
     """
     Return:
-        inside: bool
+        kind: one of the EARNINGS_* constants
         status: str
         debug: dict
-
-    Override condition:
-        event_start < window_end and event_end > window_start
+        trading_days_to_expiry: Optional[int]
     """
-    debug = {
-        "Earnings Window Start": "",
-        "Earnings Window End": "",
-        "Earnings Event Start": "",
-        "Earnings Event End": "",
-        "Earnings Timing Normalized": "",
-        "Earnings Window Overlap": "False",
-    }
+    debug = empty_earnings_debug()
 
     if "Next Earnings Date" not in row.index or "Earnings Timing" not in row.index:
-        return False, "missing earnings columns", debug
+        return EARNINGS_NONE, "missing earnings columns", debug, None
 
     raw_date = row.get("Next Earnings Date")
 
     if pd.isna(raw_date) or str(raw_date).strip() == "":
-        return False, "no earnings date", debug
+        return EARNINGS_NONE, "no earnings date", debug, None
 
-    primary_exchange = row.get("Primary Exchange", "")
+    if not expiry_date:
+        return EARNINGS_NONE, "no first usable expiry for earnings override", debug, None
 
-    window_start, window_end, local_tz_name, cal_status = get_overnight_market_window(primary_exchange)
+    if isinstance(expiry_date, str):
+        try:
+            expiry_date = dt.datetime.strptime(expiry_date, "%Y-%m-%d").date()
+        except Exception:
+            return EARNINGS_NONE, f"bad expiry date for earnings override: {expiry_date}", debug, None
 
-    if window_start is None or window_end is None or local_tz_name is None:
-        return False, cal_status, debug
+    if market_context is None:
+        market_context, cal_status = get_market_context(primary_exchange)
+    else:
+        cal_status = "ok"
 
-    event_start, event_end, timing, event_status = build_earnings_event_interval(row, local_tz_name)
+    if market_context is None:
+        return EARNINGS_NONE, cal_status, debug, None
 
-    debug["Earnings Window Start"] = str(window_start.tz_convert(local_tz_name))
-    debug["Earnings Window End"] = str(window_end.tz_convert(local_tz_name))
+    expiry_close = expiry_close_for_context(expiry_date, market_context)
+
+    if expiry_close is None:
+        return EARNINGS_NONE, f"expiry is not an exchange session: {expiry_date}", debug, None
+
+    trading_days = trading_sessions_to_expiry(
+        expiry_date,
+        primary_exchange,
+        market_context=market_context,
+    )
+
+    if trading_days is None:
+        return EARNINGS_NONE, "no trading sessions remain to first usable expiry", debug, None
+
+    event_start, event_end, timing, event_status = build_earnings_event_interval(
+        row,
+        market_context.local_tz_name,
+    )
+
+    debug["Earnings Window Start"] = str(
+        market_context.previous_close.tz_convert(market_context.local_tz_name)
+    )
+    debug["Earnings Window End"] = str(expiry_close.tz_convert(market_context.local_tz_name))
     debug["Earnings Timing Normalized"] = timing
 
     if event_start is None or event_end is None:
-        return False, event_status, debug
+        return EARNINGS_NONE, event_status, debug, trading_days
 
-    debug["Earnings Event Start"] = str(event_start.tz_convert(local_tz_name))
-    debug["Earnings Event End"] = str(event_end.tz_convert(local_tz_name))
+    debug["Earnings Event Start"] = str(event_start.tz_convert(market_context.local_tz_name))
+    debug["Earnings Event End"] = str(event_end.tz_convert(market_context.local_tz_name))
 
-    overlaps = event_start < window_end and event_end > window_start
-    debug["Earnings Window Overlap"] = str(bool(overlaps))
+    immediate_overlap = overlaps(
+        event_start,
+        event_end,
+        market_context.previous_close,
+        market_context.next_open,
+    )
+    open_to_open_overlap = overlaps(
+        event_start,
+        event_end,
+        market_context.next_open,
+        market_context.following_open,
+    )
+    following_to_expiry_overlap = overlaps(
+        event_start,
+        event_end,
+        market_context.following_open,
+        expiry_close,
+    )
+
+    if immediate_overlap:
+        kind = EARNINGS_IMMEDIATE_OVERNIGHT
+    elif open_to_open_overlap:
+        kind = EARNINGS_OPEN_TO_OPEN
+    elif following_to_expiry_overlap:
+        kind = EARNINGS_FOLLOWING_OPEN_TO_EXPIRY
+    else:
+        kind = EARNINGS_NONE
+
+    debug["Earnings Window Overlap"] = str(kind != EARNINGS_NONE)
 
     status = (
-        f"{'inside' if overlaps else 'outside'} overnight window; "
+        f"{kind}; "
         f"window_start={debug['Earnings Window Start']}; "
         f"window_end={debug['Earnings Window End']}; "
+        f"next_open={market_context.next_open.tz_convert(market_context.local_tz_name)}; "
+        f"following_open={market_context.following_open.tz_convert(market_context.local_tz_name)}; "
         f"event_start={debug['Earnings Event Start']}; "
         f"event_end={debug['Earnings Event End']}; "
         f"timing={timing}; "
+        f"trading_days_to_expiry={trading_days}; "
         f"event_status={event_status}"
     )
 
-    return overlaps, status, debug
+    return kind, status, debug, trading_days
 
 
-def get_yf_expiries(ticker):
-    today = dt.date.today()
+def get_yf_expiries(ticker, market_context: MarketContext):
     valid = []
 
     try:
@@ -479,7 +636,7 @@ def get_yf_expiries(ticker):
     for e in expiries:
         try:
             d = dt.datetime.strptime(str(e), "%Y-%m-%d").date()
-            if d >= today:
+            if is_usable_expiry(d, market_context):
                 valid.append((d, str(e)))
         except Exception:
             continue
@@ -488,7 +645,7 @@ def get_yf_expiries(ticker):
     return valid
 
 
-def yf_iv_for_expiry(ticker, expiry_date, expiry_str, spot):
+def yf_iv_for_expiry(ticker, expiry_date, expiry_str, spot, primary_exchange: str, market_context=None):
     try:
         chain = ticker.option_chain(expiry_str)
         calls = chain.calls.copy()
@@ -496,7 +653,11 @@ def yf_iv_for_expiry(ticker, expiry_date, expiry_str, spot):
     except Exception:
         return None, 0.0, "chain failed"
 
-    T = year_fraction(expiry_date)
+    T = trading_year_fraction(expiry_date, primary_exchange, market_context=market_context)
+
+    if T is None:
+        return None, 0.0, "no trading sessions to expiry"
+
     rows = []
 
     for df, is_call in [(calls, True), (puts, False)]:
@@ -560,21 +721,36 @@ def yf_iv_for_expiry(ticker, expiry_date, expiry_str, spot):
     return iv, quality_score, f"ok quality={quality_score:.4f}, rows={len(rows)}"
 
 
-def yf_weighted_iv(symbol, spot):
+def yf_weighted_iv(symbol, spot, primary_exchange: str):
+    market_context, cal_status = get_market_context(primary_exchange)
+
+    if market_context is None:
+        return None, None, None, None, cal_status
+
     try:
         ticker = yf.Ticker(symbol)
-        expiries = get_yf_expiries(ticker)
+        expiries = get_yf_expiries(ticker, market_context)
     except Exception as e:
         return None, None, None, None, f"yfinance failed: {e}"
 
     if not expiries:
-        return None, None, None, None, "no unexpired yfinance expiries"
+        return None, None, None, None, (
+            "no usable yfinance expiries closing after following market open; "
+            f"following_open={market_context.following_open.tz_convert(market_context.local_tz_name)}"
+        )
 
     iv_results = []
     statuses = []
 
     for expiry_date, expiry_str in expiries[:4]:
-        iv, quality, status = yf_iv_for_expiry(ticker, expiry_date, expiry_str, spot)
+        iv, quality, status = yf_iv_for_expiry(
+            ticker,
+            expiry_date,
+            expiry_str,
+            spot,
+            primary_exchange,
+            market_context=market_context,
+        )
         statuses.append(f"{expiry_str}: {status}")
 
         if iv is not None:
@@ -593,7 +769,14 @@ def yf_weighted_iv(symbol, spot):
 
     if len(iv_results) >= 2:
         expiry2_date, expiry2_str, iv2, quality2 = iv_results[1]
-        forward_iv = forward_iv_from_two_expiries(iv1, expiry1_date, iv2, expiry2_date)
+        forward_iv = forward_iv_from_two_expiries(
+            iv1,
+            expiry1_date,
+            iv2,
+            expiry2_date,
+            primary_exchange,
+            market_context=market_context,
+        )
         forward_expiry = expiry2_str if forward_iv is not None else ""
 
     return iv1, expiry1_str, forward_iv, forward_expiry, " | ".join(statuses)
@@ -674,9 +857,13 @@ def parse_mx(html):
     return rows
 
 
-def mx_iv_for_expiry(rows, expiry, spot):
+def mx_iv_for_expiry(rows, expiry, spot, primary_exchange: str, market_context=None):
     rows = [r for r in rows if r.expiry == expiry]
-    T = year_fraction(expiry)
+    T = trading_year_fraction(expiry, primary_exchange, market_context=market_context)
+
+    if T is None:
+        return None, 0.0, "no trading sessions to expiry"
+
     weighted = []
     filtered = []
 
@@ -747,12 +934,17 @@ def mx_iv_for_expiry(rows, expiry, spot):
     return iv, quality_score, f"ok quality={quality_score:.4f}, rows={len(weighted)}"
 
 
-def mx_weighted_iv(symbol, spot):
+def mx_weighted_iv(symbol, spot, primary_exchange: str):
     if not symbol.endswith(".TO"):
         return None, None, None, None, "skipped: not .TO"
 
     if spot is None or spot <= 0:
         return None, None, None, None, "skipped: no usable spot"
+
+    market_context, cal_status = get_market_context(primary_exchange)
+
+    if market_context is None:
+        return None, None, None, None, cal_status
 
     html, root = fetch_mx_html(symbol)
 
@@ -764,17 +956,25 @@ def mx_weighted_iv(symbol, spot):
     if not rows:
         return None, None, None, None, f"no MX rows parsed, root={root}"
 
-    today = dt.date.today()
-    expiries = sorted(set(r.expiry for r in rows if r.expiry >= today))
+    expiries = sorted(set(r.expiry for r in rows if is_usable_expiry(r.expiry, market_context)))
 
     if not expiries:
-        return None, None, None, None, f"no future MX expiries, root={root}"
+        return None, None, None, None, (
+            f"no usable MX expiries closing after following market open, root={root}; "
+            f"following_open={market_context.following_open.tz_convert(market_context.local_tz_name)}"
+        )
 
     iv_results = []
     statuses = []
 
     for expiry in expiries[:4]:
-        iv, quality, status = mx_iv_for_expiry(rows, expiry, spot)
+        iv, quality, status = mx_iv_for_expiry(
+            rows,
+            expiry,
+            spot,
+            primary_exchange,
+            market_context=market_context,
+        )
         statuses.append(f"{expiry.isoformat()}: {status}")
 
         if iv is not None:
@@ -793,50 +993,123 @@ def mx_weighted_iv(symbol, spot):
 
     if len(iv_results) >= 2:
         expiry2_date, expiry2_str, iv2, quality2 = iv_results[1]
-        forward_iv = forward_iv_from_two_expiries(iv1, expiry1_date, iv2, expiry2_date)
+        forward_iv = forward_iv_from_two_expiries(
+            iv1,
+            expiry1_date,
+            iv2,
+            expiry2_date,
+            primary_exchange,
+            market_context=market_context,
+        )
         forward_expiry = expiry2_str if forward_iv is not None else ""
 
     return iv1, expiry1_str, forward_iv, forward_expiry, f"root={root}; " + " | ".join(statuses)
 
 
-def apply_earnings_override(result, hist, earnings_inside):
-    result.override_iv = None
-    result.override_used = False
-    result.override_status = "no earnings override"
-
-    if not earnings_inside:
-        return result
-
-    result.override_used = True
-
+def earnings_base_vol(result, hist):
     if result.forward_iv is not None:
-        result.override_iv = result.forward_iv
-        result.source = result.source + "_forward_earnings_override"
-        result.override_status = "earnings override used forward IV"
-        return result
+        return result.forward_iv, "forward"
 
     hv = annualized_hist_vol(hist)
 
     if hv is not None:
-        result.override_iv = hv
-        result.source = "historical_earnings_override"
-        result.override_status = (
-            "earnings override used historical volatility because forward IV unavailable"
-        )
-
         if not result.hv_status or result.hv_status == "not attempted":
             result.hv_status = "ok"
 
-        return result
-
-    result.override_iv = None
-    result.override_status = (
-        "earnings override required but forward IV and historical volatility unavailable"
-    )
+        return hv, "historical"
 
     if not result.hv_status or result.hv_status == "not attempted":
         result.hv_status = "failed"
 
+    return None, ""
+
+
+def append_override_source(source: str, suffix: str) -> str:
+    return f"{source}_{suffix}" if source else suffix
+
+
+def apply_base_earnings_override(result, hist, override_kind):
+    base_iv, base_source = earnings_base_vol(result, hist)
+
+    if base_iv is None:
+        result.override_status = (
+            f"{override_kind} earnings override required but forward IV and "
+            "historical volatility unavailable"
+        )
+        return result
+
+    result.override_iv = base_iv
+
+    if base_source == "forward":
+        result.source = append_override_source(result.source, "forward_earnings_override")
+        result.override_status = f"{override_kind} earnings override used forward IV"
+    else:
+        result.source = append_override_source(result.source, "historical_earnings_override")
+        result.override_status = (
+            f"{override_kind} earnings override used historical volatility because "
+            "forward IV unavailable"
+        )
+
+    return result
+
+
+def apply_open_to_open_earnings_override(result, hist, first_expiry_trading_days):
+    base_iv, base_source = earnings_base_vol(result, hist)
+
+    if result.iv is None or first_expiry_trading_days is None or first_expiry_trading_days <= 0:
+        result.override_status = "open-to-open earnings override required but first-expiry IV horizon unavailable"
+        return result
+
+    if base_iv is None:
+        result.override_status = (
+            "open-to-open earnings override required but forward IV and "
+            "historical volatility unavailable"
+        )
+        return result
+
+    event_var = (
+        result.iv**2 * first_expiry_trading_days
+        - base_iv**2 * (first_expiry_trading_days - 1)
+    )
+
+    if event_var > 0 and math.isfinite(event_var):
+        result.override_iv = math.sqrt(event_var)
+        result.source = append_override_source(result.source, "open_to_open_earnings_override")
+        result.override_status = (
+            "open-to-open earnings override calculated isolated one-trading-day IV "
+            f"using {base_source} base volatility"
+        )
+        return result
+
+    result.override_iv = base_iv
+    result.source = append_override_source(
+        result.source,
+        f"open_to_open_{base_source}_fallback_earnings_override",
+    )
+    result.override_status = (
+        "open-to-open earnings variance was non-positive; "
+        f"used {base_source} base volatility"
+    )
+    return result
+
+
+def apply_earnings_override(result, hist, override_kind, first_expiry_trading_days=None):
+    result.override_iv = None
+    result.override_used = False
+    result.override_status = "no earnings override"
+
+    if override_kind == EARNINGS_NONE:
+        return result
+
+    result.override_used = True
+
+    if override_kind in {EARNINGS_IMMEDIATE_OVERNIGHT, EARNINGS_FOLLOWING_OPEN_TO_EXPIRY}:
+        return apply_base_earnings_override(result, hist, override_kind)
+
+    if override_kind == EARNINGS_OPEN_TO_OPEN:
+        return apply_open_to_open_earnings_override(result, hist, first_expiry_trading_days)
+
+    result.override_status = f"unknown earnings override kind: {override_kind}"
     return result
 
 
@@ -850,8 +1123,30 @@ def attach_earnings_debug(result, earnings_debug):
     return result
 
 
+def finalize_with_earnings(result, hist, row, primary_exchange: str, status_attr: str):
+    if "Next Earnings Date" in row.index and "Earnings Timing" in row.index:
+        override_kind, earnings_status, earnings_debug, trading_days = classify_earnings_override(
+            row,
+            primary_exchange,
+            result.expiry,
+        )
+    else:
+        override_kind = EARNINGS_NONE
+        earnings_status = "no earnings input file"
+        earnings_debug = empty_earnings_debug()
+        trading_days = None
+
+    attach_earnings_debug(result, earnings_debug)
+
+    current_status = getattr(result, status_attr)
+    setattr(result, status_attr, current_status + f"; earnings={earnings_status}")
+
+    return apply_earnings_override(result, hist, override_kind, trading_days)
+
+
 def resolve(symbol, row):
     result = IVResult()
+    primary_exchange = row.get("Primary Exchange", "")
 
     try:
         spot, hist, spot_status = get_spot(symbol)
@@ -860,26 +1155,10 @@ def resolve(symbol, row):
         spot, hist = None, None
         result.yf_status = f"spot lookup failed: {e}"
 
-    if "Next Earnings Date" in row.index and "Earnings Timing" in row.index:
-        earnings_inside, earnings_status, earnings_debug = earnings_between_last_close_and_next_open(row)
-    else:
-        earnings_inside = False
-        earnings_status = "no earnings input file"
-        earnings_debug = {
-            "Earnings Window Start": "",
-            "Earnings Window End": "",
-            "Earnings Event Start": "",
-            "Earnings Event End": "",
-            "Earnings Timing Normalized": "",
-            "Earnings Window Overlap": "False",
-        }
-
-    attach_earnings_debug(result, earnings_debug)
-
     try:
         if spot is not None and spot > 0:
-            iv, expiry, fiv, fexp, status = yf_weighted_iv(symbol, spot)
-            result.yf_status = status + f"; earnings={earnings_status}"
+            iv, expiry, fiv, fexp, status = yf_weighted_iv(symbol, spot, primary_exchange)
+            result.yf_status = status
 
             if iv is not None:
                 result.iv = iv
@@ -890,15 +1169,15 @@ def resolve(symbol, row):
                 result.final_status = "ok"
                 result.mx_status = "not attempted"
                 result.hv_status = "not attempted"
-                return apply_earnings_override(result, hist, earnings_inside)
+                return finalize_with_earnings(result, hist, row, primary_exchange, "yf_status")
         else:
-            result.yf_status = "no usable yfinance spot" + f"; earnings={earnings_status}"
+            result.yf_status = "no usable yfinance spot"
     except Exception as e:
-        result.yf_status = f"yfinance failed: {e}; earnings={earnings_status}"
+        result.yf_status = f"yfinance failed: {e}"
 
     try:
-        iv, expiry, fiv, fexp, status = mx_weighted_iv(symbol, spot)
-        result.mx_status = status + f"; earnings={earnings_status}"
+        iv, expiry, fiv, fexp, status = mx_weighted_iv(symbol, spot, primary_exchange)
+        result.mx_status = status
 
         if iv is not None:
             result.iv = iv
@@ -908,9 +1187,9 @@ def resolve(symbol, row):
             result.source = "mx_weighted"
             result.final_status = "ok"
             result.hv_status = "not attempted"
-            return apply_earnings_override(result, hist, earnings_inside)
+            return finalize_with_earnings(result, hist, row, primary_exchange, "mx_status")
     except Exception as e:
-        result.mx_status = f"mx failed: {e}; earnings={earnings_status}"
+        result.mx_status = f"mx failed: {e}"
 
     try:
         hv = annualized_hist_vol(hist)
@@ -923,12 +1202,13 @@ def resolve(symbol, row):
             result.forward_expiry = ""
             result.source = "historical"
             result.final_status = "fallback used"
-            return apply_earnings_override(result, hist, earnings_inside)
+            return finalize_with_earnings(result, hist, row, primary_exchange, "hv_status")
     except Exception as e:
         result.hv_status = f"hv failed: {e}"
 
     result.final_status = "all methods failed"
-    return apply_earnings_override(result, hist, earnings_inside)
+    attach_earnings_debug(result, empty_earnings_debug())
+    return apply_earnings_override(result, hist, EARNINGS_NONE)
 
 
 def reorder_columns(df):
