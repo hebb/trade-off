@@ -8,6 +8,8 @@ Configuration:
   - Normal defaults may be read from config.yaml, or from another file supplied
     with --config.
   - Command-line arguments override config-file values.
+  - Input and output file paths are configured under the config file's files
+    section, unless overridden by command-line arguments.
   - The anchor normally comes from config.yaml, but --anchor overrides it.
 
 Selectable objectives:
@@ -16,10 +18,9 @@ Selectable objectives:
   --objective factor_te  maximise or minimise tracking volatility relative to a leaderboard factor
   --objective win        maximise the anchor's simulated probability of finishing first
   --objective vol        maximise absolute portfolio volatility
-  --objective current    use the anchor portfolio from Leaderboard.csv, if present
+  --objective current    use the anchor portfolio from the configured leaderboard, if present
 
 Inputs and model choices:
-  - Default correlation file: correlation_matrix.csv.
   - Volatility sources are selected with --wp_vol_source, --opt_vol_source, and
     --sim_vol_source.  Both sources are read from one volatility CSV by default:
     short uses Implied Volatility, medium uses Contest Implied Volatility.  The
@@ -40,7 +41,7 @@ Constraints:
 
 Simulation:
   - Final Monte Carlo reporting uses --sim_vol_source.
-  - When the anchor is present in Leaderboard.csv, the selected portfolio is
+  - When the anchor is present in the configured leaderboard, the selected portfolio is
     inserted and finish probabilities are reported after optimisation, including
     for vol, max_te, and factor_te.
   - If the anchor is absent, objectives that can still be evaluated do not fail
@@ -103,7 +104,7 @@ def canonical_ticker(t: str, symbol_alias_map: Optional[Dict[str, str]] = None) 
     return symbol_alias_map.get(t_norm, t_norm)
 
 
-def load_symbol_alias_map(path: str = "StockList.csv") -> Dict[str, str]:
+def load_symbol_alias_map(path: str) -> Dict[str, str]:
     if not path or not os.path.exists(path):
         return {}
 
@@ -600,8 +601,21 @@ def build_leaderboard_factor(players: List[str], ports: Dict[str, Dict[str, floa
     return {t: float(w) for t, w in zip(tickers, factor_weights) if float(w) > 1e-10}
 
 
-def load_or_compute_win_probs_excl_anchor(winprob_path: str, players_ex: List[str], values_ex: Dict[str, float], W_mat_current_ex: np.ndarray, Sigma_ann_ex: np.ndarray, days_remaining: int, seed: int) -> Dict[str, float]:
-    if os.path.exists(winprob_path):
+def load_or_compute_win_probs_excl_anchor(
+    winprob_path: str,
+    players_ex: List[str],
+    values_ex: Dict[str, float],
+    W_mat_current_ex: np.ndarray,
+    Sigma_ann_ex: np.ndarray,
+    days_remaining: int,
+    seed: int,
+    overwrite_winprob_file: bool,
+) -> Dict[str, float]:
+    if not overwrite_winprob_file:
+        if not os.path.exists(winprob_path):
+            raise FileNotFoundError(
+                f"{winprob_path} does not exist. Remove --no-overwrite-winprob-file to compute and write it."
+            )
         wp = pd.read_csv(winprob_path)
         if "Name" not in wp.columns or "WinProb" not in wp.columns:
             raise ValueError(f"{winprob_path} must contain columns Name, WinProb")
@@ -610,6 +624,7 @@ def load_or_compute_win_probs_excl_anchor(winprob_path: str, players_ex: List[st
         s = sum(probs.values())
         if s <= 0:
             raise ValueError(f"{winprob_path} sums to <= 0 over non-anchor players.")
+        print(f"Read: {winprob_path}")
         return {p: w / s for p, w in probs.items()}
 
     finish_ex = simulate_finish_probs(players_ex, values_ex, W_mat_current_ex, Sigma_ann_ex, days_remaining, n_sims=200_000, seed=seed)
@@ -617,7 +632,7 @@ def load_or_compute_win_probs_excl_anchor(winprob_path: str, players_ex: List[st
     s = sum(probs.values())
     probs = {p: w / s for p, w in probs.items()}
     pd.DataFrame({"Name": list(probs.keys()), "WinProb": list(probs.values())}).sort_values("WinProb", ascending=False).to_csv(winprob_path, index=False)
-    print(f"Wrote: {winprob_path} (created because it was missing)")
+    print(f"Wrote: {winprob_path}")
     return probs
 
 
@@ -862,7 +877,7 @@ class MonteCarloObjectiveContext:
 
 def make_mc_objective_context(players: List[str], values: Dict[str, float], W_full: Dict[str, np.ndarray], Sigma_ann: np.ndarray, days_remaining: int, inner_sims: int, seed: int, anchor: str) -> MonteCarloObjectiveContext:
     if anchor not in players:
-        raise ValueError(f"Anchor {anchor!r} not found in Leaderboard.csv")
+        raise ValueError(f"Anchor {anchor!r} not found in the leaderboard")
 
     Sigma_day = Sigma_ann / 252.0
     mu_day = -0.5 * np.diag(Sigma_day)
@@ -1379,6 +1394,9 @@ def run_all(
     n_sims: int,
     seed: int,
     winprob_path: str,
+    weighted_benchmark_path: str,
+    contest_results_path: str,
+    overwrite_winprob_file: bool,
     wp_vol_source: str,
     opt_vol_source: str,
     sim_vol_source: str,
@@ -1448,7 +1466,7 @@ def run_all(
             v = float(max(values.values()))
             print(f"Selected-portfolio starting value not supplied; using current leaderboard maximum: {v:.2f}")
             return v
-        raise ValueError("Leaderboard.csv contains no usable players, so a selected starting value is required.")
+        raise ValueError("The configured leaderboard contains no usable players, so a selected starting value is required.")
 
     anchor_port: Optional[Dict[str, float]] = None
     run_final_sim = True
@@ -1468,19 +1486,19 @@ def run_all(
 
         if anchor_name not in players:
             run_final_sim = False
-            print(f"\nAnchor {anchor_name!r} was not found in Leaderboard.csv, so no final win-probability simulation was run for the selected volatility portfolio.")
+            print(f"\nAnchor {anchor_name!r} was not found in the configured leaderboard, so no final win-probability simulation was run for the selected volatility portfolio.")
 
     elif objective == "current":
         if anchor_name in ports:
             anchor_port = ports[anchor_name]
             if forced and not is_legal_portfolio(anchor_port, constraints, forced):
                 raise ValueError("--objective current was selected, but the current anchor portfolio does not satisfy --forced.")
-            print(f"\nUsing current {anchor_name} portfolio from Leaderboard.csv (no optimisation):")
+            print(f"\nUsing current {anchor_name} portfolio from the configured leaderboard (no optimisation):")
             for t, wt in sorted(anchor_port.items(), key=lambda x: x[1], reverse=True):
                 print(f"  {t:8s}  {wt * 100:6.2f}%")
         else:
             anchor_port = None
-            print(f"\nAnchor {anchor_name!r} was not found in Leaderboard.csv; simulating the current leaderboard as-is.")
+            print(f"\nAnchor {anchor_name!r} was not found in the configured leaderboard; simulating the current leaderboard as-is.")
 
     elif objective in {"te", "max_te"}:
         players_ex = [p for p in players if p != anchor_name]
@@ -1491,7 +1509,16 @@ def run_all(
         u_index_wp_ex = {t: i for i, t in enumerate(universe_ex)}
         W_current_ex = {p: vectorize_port(ports[p], u_index_wp_ex) for p in players_ex}
         W_mat_current_ex = np.stack([W_current_ex[p] for p in players_ex], axis=0)
-        win_probs = load_or_compute_win_probs_excl_anchor(winprob_path, players_ex, values_ex, W_mat_current_ex, Sigma_ann_wp_ex, days_remaining, seed)
+        win_probs = load_or_compute_win_probs_excl_anchor(
+            winprob_path,
+            players_ex,
+            values_ex,
+            W_mat_current_ex,
+            Sigma_ann_wp_ex,
+            days_remaining,
+            seed,
+            overwrite_winprob_file,
+        )
         bench = build_weighted_benchmark(players_ex, ports, win_probs)
         bench = filter_portfolio_to_corr(bench, corr)
         for t in list(bench.keys()):
@@ -1501,8 +1528,8 @@ def run_all(
         if sb > 0:
             for k in list(bench.keys()):
                 bench[k] /= sb
-        pd.DataFrame([{"Ticker": k, "Weight": v} for k, v in sorted(bench.items(), key=lambda x: x[1], reverse=True)]).to_csv("weighted_benchmark.csv", index=False)
-        print("Wrote: weighted_benchmark.csv")
+        pd.DataFrame([{"Ticker": k, "Weight": v} for k, v in sorted(bench.items(), key=lambda x: x[1], reverse=True)]).to_csv(weighted_benchmark_path, index=False)
+        print(f"Wrote: {weighted_benchmark_path}")
 
         universe0 = sorted(set(tickers_for_anchor) | set(bench.keys()) | {"CASH"})
         corr_u_te, vol_vec_te = ensure_corr_and_vol_coverage(universe0, corr, vols_opt)
@@ -1664,7 +1691,7 @@ def run_all(
                 values_sim[anchor_name] = selected_start_value()
                 print(f"\nAdded synthetic entrant {anchor_name!r} for final simulation with starting value {values_sim[anchor_name]:.2f}.")
             else:
-                print(f"\nAnchor {anchor_name!r} was not found in Leaderboard.csv, so the selected portfolio cannot be inserted into the final contest simulation.")
+                print(f"\nAnchor {anchor_name!r} was not found in the configured leaderboard, so the selected portfolio cannot be inserted into the final contest simulation.")
                 return
         ports_adj[anchor_name] = anchor_port
 
@@ -1711,8 +1738,8 @@ def run_all(
             row[f"TrackingError_to_{anchor_name}"] = te_to_a[p]
         out_rows.append(row)
 
-    pd.DataFrame(out_rows).sort_values("P1st", ascending=False).to_csv("contest_results.csv", index=False)
-    print("\nWrote: contest_results.csv")
+    pd.DataFrame(out_rows).sort_values("P1st", ascending=False).to_csv(contest_results_path, index=False)
+    print(f"\nWrote: {contest_results_path}")
 
 
 def load_config_file(path: str) -> Dict[str, object]:
@@ -1758,6 +1785,13 @@ def choose(cli_value, config: Dict[str, object], section: str, key: str, default
     return cli_value if cli_value is not None else cfg_get(config, section, key, default)
 
 
+def choose_required(cli_value, config: Dict[str, object], section: str, key: str):
+    value = choose(cli_value, config, section, key, None)
+    if value is None or str(value).strip() == "":
+        raise ValueError(f"Missing required config value: {section}.{key}")
+    return value
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Combined contest optimiser.")
     parser.add_argument("--config", type=str, default=None, help="Configuration file. Default: config.yaml if it exists.")
@@ -1788,6 +1822,14 @@ if __name__ == "__main__":
     parser.add_argument("--forced", type=str, default=None, help='Forced holdings, e.g. "AAPL=25,NVDA=15,SHOP=10".')
     parser.add_argument("--max_cash", type=int, default=None, help="Maximum CASH percent allowed in anchor portfolio.")
     parser.add_argument("--winprob-file", type=str, default=None, help="Win-probability CSV used/created only by --objective te or max_te.")
+    parser.add_argument("--weighted-benchmark-file", type=str, default=None, help="Weighted benchmark CSV written only by --objective te or max_te.")
+    parser.add_argument("--contest-results-file", type=str, default=None, help="Final contest results CSV.")
+    parser.add_argument(
+        "--overwrite-winprob-file",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether TE/MAX_TE recomputes and overwrites the win-probability CSV. Use --no-overwrite-winprob-file to read it instead.",
+    )
 
     args = parser.parse_args()
 
@@ -1804,11 +1846,13 @@ if __name__ == "__main__":
     selected_value_raw = choose(args.selected_value, config, "run", "selected_value", None)
     selected_value = None if selected_value_raw is None or str(selected_value_raw).strip() == "" else float(selected_value_raw)
 
-    leaderboard = str(choose(args.leaderboard, config, "files", "leaderboard_csv", "Leaderboard.csv"))
-    stocklist = str(choose(args.stocklist, config, "files", "stocklist_csv", "StockList.csv"))
-    corr_file = str(choose(args.corr_file, config, "files", "corr_file", "correlation_matrix.csv"))
-    vol_file = str(choose(args.vol_file, config, "files", "volatility_csv", "StockList_with_IV.csv"))
-    winprob_file = str(choose(args.winprob_file, config, "files", "winprob_path", "WinProbabilities_excl_anchor.csv"))
+    leaderboard = str(choose_required(args.leaderboard, config, "files", "leaderboard_csv"))
+    stocklist = str(choose_required(args.stocklist, config, "files", "stocklist_csv"))
+    corr_file = str(choose_required(args.corr_file, config, "files", "corr_file"))
+    vol_file = str(choose_required(args.vol_file, config, "files", "volatility_csv"))
+    winprob_file = str(choose_required(args.winprob_file, config, "files", "winprob_path"))
+    weighted_benchmark_file = str(choose_required(args.weighted_benchmark_file, config, "files", "weighted_benchmark_csv"))
+    contest_results_file = str(choose_required(args.contest_results_file, config, "files", "contest_results_csv"))
 
     days_arg = args.days
     days = get_days_remaining(None if days_arg is None else int(days_arg))
@@ -1858,6 +1902,9 @@ if __name__ == "__main__":
         n_sims=sims,
         seed=seed,
         winprob_path=winprob_file,
+        weighted_benchmark_path=weighted_benchmark_file,
+        contest_results_path=contest_results_file,
+        overwrite_winprob_file=bool(args.overwrite_winprob_file),
         wp_vol_source=wp_vol_source,
         opt_vol_source=opt_vol_source,
         sim_vol_source=sim_vol_source,

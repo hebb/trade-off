@@ -5,6 +5,8 @@ files:
   corr_file: correlation_matrix.csv
   volatility_csv: StockList_with_IV.csv
   winprob_path: WinProbabilities_excl_anchor.csv
+  weighted_benchmark_csv: weighted_benchmark.csv
+  contest_results_csv: contest_results.csv
 
 model:
   wp_vol_source: short
