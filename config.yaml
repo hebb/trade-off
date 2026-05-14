@@ -7,6 +7,8 @@ files:
   winprob_path: WinProbabilities_excl_anchor.csv
   weighted_benchmark_csv: weighted_benchmark.csv
   contest_results_csv: contest_results.csv
+  projected_leaderboard_csv: Leaderboard_projected.csv
+  last_day_returns_csv: last_day_returns.csv
 
 model:
   wp_vol_source: short
@@ -25,6 +27,13 @@ win_objective:
 final_simulation:
   sims: 400000
   seed: 0
+
+leaderboard_update:
+  period: 14d
+  fx_ticker: CAD=X
+  ticker_overrides:
+    - APPL=AAPL
+  allow_missing: false
 
 run:
   objective: te

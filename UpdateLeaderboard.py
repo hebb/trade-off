@@ -13,6 +13,7 @@ rankings.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 from dataclasses import dataclass
@@ -166,6 +167,8 @@ def add_unique(items: List[str], value: object) -> None:
 
 def parse_ticker_overrides(values: Optional[List[str]]) -> Dict[str, str]:
     overrides: Dict[str, str] = {}
+    if isinstance(values, str):
+        values = [values]
     for item in values or []:
         if "=" not in item:
             raise ValueError(f"Bad --ticker-override {item!r}. Use HOLDING=YAHOO_SYMBOL.")
@@ -405,19 +408,89 @@ def collect_all_candidate_symbols(holdings: Iterable[str], stock_list: pd.DataFr
     return symbols
 
 
+def load_config_file(path: str) -> Dict[str, object]:
+    if not path or not os.path.exists(path):
+        return {}
+
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    if not text.strip():
+        return {}
+
+    if path.lower().endswith(".json"):
+        data = json.loads(text)
+    else:
+        try:
+            import yaml  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                f"Configuration file {path!r} appears to be YAML, but PyYAML is not installed. "
+                "Install it with: pip install pyyaml"
+            ) from exc
+        data = yaml.safe_load(text)
+
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Configuration file {path!r} must contain a mapping at the top level.")
+    return data
+
+
+def cfg_get(config: Dict[str, object], section: str, key: str, default):
+    sec = config.get(section, {})
+    if isinstance(sec, dict) and key in sec:
+        return sec[key]
+    if key in config:
+        return config[key]
+    return default
+
+
+def choose(cli_value, config: Dict[str, object], section: str, key: str, default):
+    return cli_value if cli_value is not None else cfg_get(config, section, key, default)
+
+
+def choose_required(cli_value, config: Dict[str, object], section: str, key: str):
+    value = choose(cli_value, config, section, key, None)
+    if value is None or str(value).strip() == "":
+        raise ValueError(f"Missing required config value: {section}.{key}")
+    return value
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Project leaderboard values using latest one-day stock and FX returns.")
-    parser.add_argument("--leaderboard", default="Leaderboard.csv", help="Input leaderboard CSV.")
-    parser.add_argument("--stock-list", default="StockList.csv", help="Stock list used to resolve Canadian tickers.")
-    parser.add_argument("--out", default="Leaderboard_projected.csv", help="Projected leaderboard output CSV.")
-    parser.add_argument("--returns-out", default="last_day_returns.csv", help="Holding return audit output CSV. Use '' to skip.")
-    parser.add_argument("--period", default="14d", help="Yahoo Finance lookback period for daily closes.")
-    parser.add_argument("--fx-ticker", default=DEFAULT_FX_TICKER, help="Yahoo ticker for CAD per USD exchange rate.")
-    parser.add_argument("--ticker-override", action="append", default=[], help="Resolve a leaderboard holding to a Yahoo ticker, e.g. APPL=AAPL. Can be repeated.")
-    parser.add_argument("--allow-missing", action="store_true", help="Write partial output instead of failing on missing holding returns.")
+    parser.add_argument("--config", default=None, help="Configuration file. Default: config.yaml if it exists.")
+    parser.add_argument("--leaderboard", default=None, help="Input leaderboard CSV. Defaults to files.leaderboard_csv.")
+    parser.add_argument("--stock-list", default=None, help="Stock list used to resolve Canadian tickers. Defaults to files.stocklist_csv.")
+    parser.add_argument("--out", default=None, help="Projected leaderboard output CSV. Defaults to files.projected_leaderboard_csv.")
+    parser.add_argument("--returns-out", default=None, help="Holding return audit output CSV. Defaults to files.last_day_returns_csv. Use '' to skip.")
+    parser.add_argument("--period", default=None, help="Yahoo Finance lookback period for daily closes.")
+    parser.add_argument("--fx-ticker", default=None, help="Yahoo ticker for CAD per USD exchange rate.")
+    parser.add_argument("--ticker-override", action="append", default=None, help="Resolve a leaderboard holding to a Yahoo ticker, e.g. APPL=AAPL. Can be repeated.")
+    parser.add_argument(
+        "--allow-missing",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Write partial output instead of failing on missing holding returns.",
+    )
     args = parser.parse_args()
 
-    leaderboard = pd.read_csv(args.leaderboard)
+    config_path = args.config
+    if config_path is None and os.path.exists("config.yaml"):
+        config_path = "config.yaml"
+    config = load_config_file(config_path) if config_path else {}
+
+    leaderboard_path = str(choose_required(args.leaderboard, config, "files", "leaderboard_csv"))
+    stock_list_path = str(choose_required(args.stock_list, config, "files", "stocklist_csv"))
+    out_path = str(choose_required(args.out, config, "files", "projected_leaderboard_csv"))
+    returns_out = choose(args.returns_out, config, "files", "last_day_returns_csv", None)
+    returns_out = "" if returns_out is None else str(returns_out)
+    period = str(choose(args.period, config, "leaderboard_update", "period", "14d"))
+    fx_ticker = str(choose(args.fx_ticker, config, "leaderboard_update", "fx_ticker", DEFAULT_FX_TICKER))
+    ticker_overrides = choose(args.ticker_override, config, "leaderboard_update", "ticker_overrides", [])
+    allow_missing = bool(choose(args.allow_missing, config, "leaderboard_update", "allow_missing", False))
+
+    leaderboard = pd.read_csv(leaderboard_path)
     required = {"Name", "Value", "Holdings"}
     missing_cols = required - set(leaderboard.columns)
     if missing_cols:
@@ -427,14 +500,14 @@ def main() -> None:
     if "Weights" not in leaderboard.columns:
         leaderboard["Weights"] = ""
 
-    stock_list = load_stock_list(args.stock_list)
-    overrides = parse_ticker_overrides(args.ticker_override)
+    stock_list = load_stock_list(stock_list_path)
+    overrides = parse_ticker_overrides(ticker_overrides)
     holdings = sorted({h for value in leaderboard["Holdings"] for h in parse_holdings(value)})
-    symbols = collect_all_candidate_symbols(holdings, stock_list, args.fx_ticker, overrides)
-    closes = fetch_price_history(symbols, args.period)
+    symbols = collect_all_candidate_symbols(holdings, stock_list, fx_ticker, overrides)
+    closes = fetch_price_history(symbols, period)
 
-    returns, missing = compute_holding_returns(holdings, stock_list, closes, args.fx_ticker, overrides)
-    if missing and not args.allow_missing:
+    returns, missing = compute_holding_returns(holdings, stock_list, closes, fx_ticker, overrides)
+    if missing and not allow_missing:
         raise ValueError(
             "Missing price history for holdings: "
             + ", ".join(missing)
@@ -442,14 +515,14 @@ def main() -> None:
         )
 
     projected = project_leaderboard(leaderboard, returns, missing)
-    projected.to_csv(args.out, index=False)
+    projected.to_csv(out_path, index=False)
 
-    if args.returns_out:
-        returns_to_frame(returns, missing).to_csv(args.returns_out, index=False)
+    if returns_out:
+        returns_to_frame(returns, missing).to_csv(returns_out, index=False)
 
-    print(f"Wrote: {args.out}")
-    if args.returns_out:
-        print(f"Wrote: {args.returns_out}")
+    print(f"Wrote: {out_path}")
+    if returns_out:
+        print(f"Wrote: {returns_out}")
     complete = projected["NewValue"].notna().sum()
     print(f"Projected {complete} of {len(projected)} leaderboard rows.")
     if not projected.empty and projected["NewValue"].notna().any():
