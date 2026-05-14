@@ -2,5 +2,7 @@
 *.csv
 *.csv#
 __pycache__/
+.codex
+.agents
 
 !StockList.csv
