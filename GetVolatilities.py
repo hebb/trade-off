@@ -23,6 +23,7 @@ except Exception:
 
 INPUT_FILE = "StockList_with_earnings.csv" if os.path.exists("StockList_with_earnings.csv") else "StockList.csv"
 OUTPUT_FILE = "StockList_with_IV.csv"
+CONFIG_FILE = "config.yaml"
 
 RISK_FREE_RATE = 0.03
 HIST_VOL_LOOKBACK_DAYS = 60
@@ -70,6 +71,9 @@ class IVResult:
     expiry: str = ""
     forward_iv: Optional[float] = None
     forward_expiry: str = ""
+    contest_iv: Optional[float] = None
+    contest_expiry: str = ""
+    contest_iv_status: str = ""
     override_iv: Optional[float] = None
     override_used: bool = False
     override_status: str = ""
@@ -160,6 +164,74 @@ def annualized_hist_vol(prices):
     return float(r.std(ddof=1) * math.sqrt(252))
 
 
+def load_config_file(path: str = CONFIG_FILE):
+    if not path or not os.path.exists(path):
+        return {}
+
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    if not text.strip():
+        return {}
+
+    if path.lower().endswith(".json"):
+        data = json.loads(text)
+    else:
+        try:
+            import yaml  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                f"Configuration file {path!r} appears to be YAML, but PyYAML is not installed. "
+                "Install it with: pip install pyyaml"
+            ) from exc
+        data = yaml.safe_load(text)
+
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Configuration file {path!r} must contain a mapping at the top level.")
+    return data
+
+
+def cfg_get(config, section: str, key: str, default=None):
+    sec = config.get(section, {})
+    if isinstance(sec, dict) and key in sec:
+        return sec[key]
+    if key in config:
+        return config[key]
+    return default
+
+
+def parse_config_date(value, label: str = "date") -> Optional[dt.date]:
+    if value is None:
+        return None
+
+    if isinstance(value, dt.datetime):
+        return value.date()
+
+    if isinstance(value, dt.date):
+        return value
+
+    if pd.isna(value) or str(value).strip() == "":
+        return None
+
+    try:
+        return pd.to_datetime(value).date()
+    except Exception as e:
+        raise ValueError(f"Could not parse {label} {value!r} as a date.") from e
+
+
+def get_contest_end_date(config) -> Optional[dt.date]:
+    raw = cfg_get(config, "contest", "end_date", None)
+    if raw is None:
+        raw = cfg_get(config, "contest", "contest_end_date", None)
+    if raw is None:
+        raw = cfg_get(config, "run", "contest_end_date", None)
+    if raw is None:
+        raw = cfg_get(config, "model", "contest_end_date", None)
+    return parse_config_date(raw, "contest end date")
+
+
 def clean_df(path):
     df = pd.read_csv(path)
 
@@ -171,10 +243,13 @@ def clean_df(path):
 
     numeric_cols = [
         "Implied Volatility",
+        "Contest Implied Volatility",
     ]
 
     text_cols = [
         "Expiry Date",
+        "Contest Expiry Date",
+        "Contest IV Status",
         "IV Source",
         "Final Status",
         "YF Status",
@@ -645,6 +720,17 @@ def get_yf_expiries(ticker, market_context: MarketContext):
     return valid
 
 
+def expiries_closest_to_target(expiries, target_date: dt.date):
+    return sorted(
+        expiries,
+        key=lambda x: (
+            abs((x[0] - target_date).days),
+            x[0] < target_date,
+            x[0],
+        ),
+    )
+
+
 def yf_iv_for_expiry(ticker, expiry_date, expiry_str, spot, primary_exchange: str, market_context=None):
     try:
         chain = ticker.option_chain(expiry_str)
@@ -719,6 +805,56 @@ def yf_iv_for_expiry(ticker, expiry_date, expiry_str, spot, primary_exchange: st
 
     iv = float(np.average([x[0] for x in rows], weights=[x[1] for x in rows]))
     return iv, quality_score, f"ok quality={quality_score:.4f}, rows={len(rows)}"
+
+
+def yf_contest_iv(symbol, spot, primary_exchange: str, contest_end_date: Optional[dt.date]):
+    if contest_end_date is None:
+        return None, "", "skipped: contest.end_date not configured"
+
+    if spot is None or spot <= 0:
+        return None, "", "skipped: no usable spot"
+
+    market_context, cal_status = get_market_context(primary_exchange)
+
+    if market_context is None:
+        return None, "", cal_status
+
+    try:
+        ticker = yf.Ticker(symbol)
+        expiries = get_yf_expiries(ticker, market_context)
+    except Exception as e:
+        return None, "", f"yfinance failed: {e}"
+
+    if not expiries:
+        return None, "", (
+            "no usable yfinance expiries closing after following market open; "
+            f"contest_end_date={contest_end_date.isoformat()}; "
+            f"following_open={market_context.following_open.tz_convert(market_context.local_tz_name)}"
+        )
+
+    statuses = []
+
+    for expiry_date, expiry_str in expiries_closest_to_target(expiries, contest_end_date):
+        iv, quality, status = yf_iv_for_expiry(
+            ticker,
+            expiry_date,
+            expiry_str,
+            spot,
+            primary_exchange,
+            market_context=market_context,
+        )
+        statuses.append(f"{expiry_str}: {status}")
+
+        if iv is not None:
+            return iv, expiry_str, (
+                f"ok; contest_end_date={contest_end_date.isoformat()}; "
+                f"selected={expiry_str}; source=yfinance; {status}"
+            )
+
+    return None, "", (
+        f"no usable yfinance contest IV; contest_end_date={contest_end_date.isoformat()}; "
+        + " | ".join(statuses)
+    )
 
 
 def yf_weighted_iv(symbol, spot, primary_exchange: str):
@@ -934,6 +1070,67 @@ def mx_iv_for_expiry(rows, expiry, spot, primary_exchange: str, market_context=N
     return iv, quality_score, f"ok quality={quality_score:.4f}, rows={len(weighted)}"
 
 
+def mx_contest_iv(symbol, spot, primary_exchange: str, contest_end_date: Optional[dt.date]):
+    if contest_end_date is None:
+        return None, "", "skipped: contest.end_date not configured"
+
+    if not symbol.endswith(".TO"):
+        return None, "", "skipped: not .TO"
+
+    if spot is None or spot <= 0:
+        return None, "", "skipped: no usable spot"
+
+    market_context, cal_status = get_market_context(primary_exchange)
+
+    if market_context is None:
+        return None, "", cal_status
+
+    html, root = fetch_mx_html(symbol)
+
+    if not html:
+        return None, "", "MX fetch failed"
+
+    rows = parse_mx(html)
+
+    if not rows:
+        return None, "", f"no MX rows parsed, root={root}"
+
+    expiries = [
+        (e, e.isoformat())
+        for e in sorted(set(r.expiry for r in rows if is_usable_expiry(r.expiry, market_context)))
+    ]
+
+    if not expiries:
+        return None, "", (
+            f"no usable MX expiries closing after following market open, root={root}; "
+            f"contest_end_date={contest_end_date.isoformat()}; "
+            f"following_open={market_context.following_open.tz_convert(market_context.local_tz_name)}"
+        )
+
+    statuses = []
+
+    for expiry, expiry_str in expiries_closest_to_target(expiries, contest_end_date):
+        iv, quality, status = mx_iv_for_expiry(
+            rows,
+            expiry,
+            spot,
+            primary_exchange,
+            market_context=market_context,
+        )
+        statuses.append(f"{expiry_str}: {status}")
+
+        if iv is not None:
+            return iv, expiry_str, (
+                f"ok; contest_end_date={contest_end_date.isoformat()}; "
+                f"selected={expiry_str}; source=mx; root={root}; {status}"
+            )
+
+    return None, "", (
+        f"no usable MX contest IV, root={root}; contest_end_date={contest_end_date.isoformat()}; "
+        + " | ".join(statuses)
+    )
+
+
 def mx_weighted_iv(symbol, spot, primary_exchange: str):
     if not symbol.endswith(".TO"):
         return None, None, None, None, "skipped: not .TO"
@@ -1144,7 +1341,35 @@ def finalize_with_earnings(result, hist, row, primary_exchange: str, status_attr
     return apply_earnings_override(result, hist, override_kind, trading_days)
 
 
-def resolve(symbol, row):
+def attach_contest_iv(result, symbol, spot, primary_exchange: str, contest_end_date: Optional[dt.date]):
+    result.contest_iv = None
+    result.contest_expiry = ""
+
+    if contest_end_date is None:
+        result.contest_iv_status = "skipped: contest.end_date not configured"
+        return result
+
+    iv, expiry, yf_status = yf_contest_iv(symbol, spot, primary_exchange, contest_end_date)
+
+    if iv is not None:
+        result.contest_iv = iv
+        result.contest_expiry = expiry or ""
+        result.contest_iv_status = yf_status
+        return result
+
+    mx_iv, mx_expiry, mx_status = mx_contest_iv(symbol, spot, primary_exchange, contest_end_date)
+
+    if mx_iv is not None:
+        result.contest_iv = mx_iv
+        result.contest_expiry = mx_expiry or ""
+        result.contest_iv_status = f"yfinance: {yf_status}; mx: {mx_status}"
+        return result
+
+    result.contest_iv_status = f"yfinance: {yf_status}; mx: {mx_status}"
+    return result
+
+
+def resolve(symbol, row, contest_end_date: Optional[dt.date] = None):
     result = IVResult()
     primary_exchange = row.get("Primary Exchange", "")
 
@@ -1169,6 +1394,7 @@ def resolve(symbol, row):
                 result.final_status = "ok"
                 result.mx_status = "not attempted"
                 result.hv_status = "not attempted"
+                attach_contest_iv(result, symbol, spot, primary_exchange, contest_end_date)
                 return finalize_with_earnings(result, hist, row, primary_exchange, "yf_status")
         else:
             result.yf_status = "no usable yfinance spot"
@@ -1187,6 +1413,7 @@ def resolve(symbol, row):
             result.source = "mx_weighted"
             result.final_status = "ok"
             result.hv_status = "not attempted"
+            attach_contest_iv(result, symbol, spot, primary_exchange, contest_end_date)
             return finalize_with_earnings(result, hist, row, primary_exchange, "mx_status")
     except Exception as e:
         result.mx_status = f"mx failed: {e}"
@@ -1202,11 +1429,13 @@ def resolve(symbol, row):
             result.forward_expiry = ""
             result.source = "historical"
             result.final_status = "fallback used"
+            attach_contest_iv(result, symbol, spot, primary_exchange, contest_end_date)
             return finalize_with_earnings(result, hist, row, primary_exchange, "hv_status")
     except Exception as e:
         result.hv_status = f"hv failed: {e}"
 
     result.final_status = "all methods failed"
+    attach_contest_iv(result, symbol, spot, primary_exchange, contest_end_date)
     attach_earnings_debug(result, empty_earnings_debug())
     return apply_earnings_override(result, hist, EARNINGS_NONE)
 
@@ -1217,6 +1446,9 @@ def reorder_columns(df):
         "Symbol",
         "Implied Volatility",
         "Expiry Date",
+        "Contest Implied Volatility",
+        "Contest Expiry Date",
+        "Contest IV Status",
         "IV Source",
         "Final Status",
         "YF Status",
@@ -1232,6 +1464,13 @@ def reorder_columns(df):
 
 
 def main():
+    config = load_config_file(CONFIG_FILE)
+    contest_end_date = get_contest_end_date(config)
+    print(
+        "contest.end_date="
+        f"{contest_end_date.isoformat() if contest_end_date is not None else 'not configured'}"
+    )
+
     df = clean_df(INPUT_FILE)
 
     for i, row in df.iterrows():
@@ -1239,9 +1478,12 @@ def main():
 
         if pd.isna(raw_symbol) or str(raw_symbol).strip() == "":
             df.at[i, "Implied Volatility"] = np.nan
+            df.at[i, "Contest Implied Volatility"] = np.nan
             df.at[i, "Forward Implied Volatility"] = np.nan
             df.at[i, "Earnings Override Volatility"] = np.nan
             df.at[i, "Expiry Date"] = ""
+            df.at[i, "Contest Expiry Date"] = ""
+            df.at[i, "Contest IV Status"] = "blank symbol"
             df.at[i, "Forward Expiry Date"] = ""
             df.at[i, "Earnings Override Used"] = "False"
             df.at[i, "Earnings Override Status"] = "blank symbol"
@@ -1262,7 +1504,7 @@ def main():
         symbol = str(raw_symbol).strip().upper()
 
         try:
-            r = resolve(symbol, row)
+            r = resolve(symbol, row, contest_end_date=contest_end_date)
         except Exception as e:
             r = IVResult(final_status=f"unexpected failure: {e}")
 
@@ -1270,6 +1512,11 @@ def main():
 
         df.at[i, "Implied Volatility"] = output_iv if output_iv is not None else np.nan
         df.at[i, "Expiry Date"] = r.expiry
+        df.at[i, "Contest Implied Volatility"] = (
+            r.contest_iv if r.contest_iv is not None else np.nan
+        )
+        df.at[i, "Contest Expiry Date"] = r.contest_expiry
+        df.at[i, "Contest IV Status"] = r.contest_iv_status
         df.at[i, "IV Source"] = r.source
         df.at[i, "Final Status"] = r.final_status
         df.at[i, "YF Status"] = r.yf_status
@@ -1278,6 +1525,7 @@ def main():
 
         print(
             f"{symbol}: IV={r.iv} expiry={r.expiry} "
+            f"contest_IV={r.contest_iv} contest_expiry={r.contest_expiry} "
             f"forward_IV={r.forward_iv} forward_expiry={r.forward_expiry} "
             f"override_IV={r.override_iv} override_used={r.override_used} "
             f"overlap={r.earnings_window_overlap} "

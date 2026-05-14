@@ -12,6 +12,9 @@ model:
   sim_vol_source: medium
   max_cash: 25
 
+contest:
+  end_date: 2026-06-12
+
 win_objective:
   inner_sims: 12000
   rounds: 8
