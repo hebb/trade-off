@@ -11,31 +11,35 @@ Configuration:
   - The anchor normally comes from config.yaml, but --anchor overrides it.
 
 Selectable objectives:
-  --objective te       minimise tracking error to a win-probability-weighted benchmark
-  --objective max_te   maximise tracking error to the same benchmark
-  --objective win      maximise the anchor's simulated probability of finishing first
-  --objective vol      maximise absolute portfolio volatility
-  --objective current  use the anchor portfolio from Leaderboard.csv, if present
+  --objective te         minimise tracking error to a win-probability-weighted benchmark
+  --objective max_te     maximise tracking error to the same benchmark
+  --objective factor_te  maximise tracking volatility relative to the largest leaderboard factor
+  --objective win        maximise the anchor's simulated probability of finishing first
+  --objective vol        maximise absolute portfolio volatility
+  --objective current    use the anchor portfolio from Leaderboard.csv, if present
 
 Inputs and model choices:
   - Default correlation file: correlation_matrix.csv.
   - Volatility sources are selected with --wp_vol_source, --opt_vol_source, and
     --sim_vol_source.  The optimisation volatility source is used for te,
-    max_te, win, and vol.
+    max_te, factor_te, win, and vol.
   - The weighted benchmark is calculated only for te and max_te.
+  - The largest leaderboard factor is calculated only for factor_te, using the
+    first right singular vector of current non-anchor leaderboard portfolio
+    weights, with negative loadings clipped and the result normalized.
 
 Constraints:
   - Contest rules: at least 5 stocks; each stock 5%-25%; 1% increments;
     cash allowed up to --max_cash; no shorting.
-  - --exclude applies to te, max_te, win, and vol.
-  - --forced applies to te, max_te, win, and vol, e.g. --forced "AAPL=25,NVDA=10".
+  - --exclude applies to te, max_te, factor_te, win, and vol.
+  - --forced applies to te, max_te, factor_te, win, and vol, e.g. --forced "AAPL=25,NVDA=10".
   - Forced holdings are allowed even when the same ticker appears in --exclude.
 
 Simulation:
   - Final Monte Carlo reporting uses --sim_vol_source.
   - When the anchor is present in Leaderboard.csv, the selected portfolio is
     inserted and finish probabilities are reported after optimisation, including
-    for vol and max_te.
+    for vol, max_te, and factor_te.
   - If the anchor is absent, objectives that can still be evaluated do not fail
     solely for that reason; anchor-specific final reporting is skipped when the
     selected portfolio cannot be inserted.
@@ -547,6 +551,45 @@ def build_weighted_benchmark(players: List[str], ports: Dict[str, Dict[str, floa
     for k in list(bench.keys()):
         bench[k] /= s
     return bench
+
+
+def build_largest_leaderboard_factor(players: List[str], ports: Dict[str, Dict[str, float]]) -> Dict[str, float]:
+    """Build a long-only proxy for the largest common leaderboard factor.
+
+    The input matrix is player portfolio weights by ticker, excluding CASH.
+    Using the uncentred first right singular vector captures the largest common
+    holding pattern rather than a contrast between two centred clusters.  The
+    sign of an SVD vector is arbitrary, so it is flipped to have positive total
+    loading.  Negative residual loadings are clipped to zero and the result is
+    normalized to a 100% factor portfolio.
+    """
+    tickers = sorted({t for p in players for t in ports.get(p, {}) if t != "CASH"})
+    if len(players) < 1 or len(tickers) < 1:
+        raise ValueError("Cannot build a leaderboard factor without at least one non-cash holding.")
+
+    ticker_index = {t: i for i, t in enumerate(tickers)}
+    weights = np.zeros((len(players), len(tickers)), dtype=float)
+    for r, player in enumerate(players):
+        for t, wt in ports.get(player, {}).items():
+            if t in ticker_index:
+                weights[r, ticker_index[t]] += float(wt)
+
+    if not np.any(weights > 0):
+        raise ValueError("Cannot build a leaderboard factor because all leaderboard holdings are cash or unusable.")
+
+    _, _, vt = np.linalg.svd(weights, full_matrices=False)
+    loadings = vt[0].astype(float)
+    if loadings.sum() < 0:
+        loadings = -loadings
+
+    positive = np.maximum(loadings, 0.0)
+    if positive.sum() <= 1e-12:
+        positive = np.abs(loadings)
+    if positive.sum() <= 1e-12:
+        raise ValueError("Cannot build a usable largest factor from the leaderboard portfolio matrix.")
+
+    factor_weights = positive / positive.sum()
+    return {t: float(w) for t, w in zip(tickers, factor_weights) if float(w) > 1e-10}
 
 
 def load_or_compute_win_probs_excl_anchor(winprob_path: str, players_ex: List[str], values_ex: Dict[str, float], W_mat_current_ex: np.ndarray, Sigma_ann_ex: np.ndarray, days_remaining: int, seed: int) -> Dict[str, float]:
@@ -1484,6 +1527,59 @@ def run_all(
         for t, wt in sorted(anchor_port.items(), key=lambda x: x[1], reverse=True):
             print(f"  {t:8s}  {wt * 100:6.2f}%")
 
+    elif objective == "factor_te":
+        players_factor = [p for p in players if p != anchor_name]
+        if not players_factor:
+            players_factor = list(players)
+        factor = build_largest_leaderboard_factor(players_factor, ports)
+        factor = filter_portfolio_to_corr(factor, corr)
+        factor_sum = sum(factor.values())
+        if factor_sum <= 0:
+            raise ValueError("The largest leaderboard factor has no usable non-cash correlation tickers.")
+        for k in list(factor.keys()):
+            factor[k] /= factor_sum
+
+        pd.DataFrame(
+            [{"Ticker": k, "Weight": v} for k, v in sorted(factor.items(), key=lambda x: x[1], reverse=True)]
+        ).to_csv("leaderboard_largest_factor.csv", index=False)
+        print("Wrote: leaderboard_largest_factor.csv")
+        print("\nLargest leaderboard factor, top holdings:")
+        for t, wt in sorted(factor.items(), key=lambda x: x[1], reverse=True)[:12]:
+            print(f"  {t:8s}  {wt * 100:6.2f}%")
+
+        universe0 = sorted(set(tickers_for_anchor) | set(factor.keys()) | {"CASH"})
+        corr_u_factor, vol_vec_factor = ensure_corr_and_vol_coverage(universe0, corr, vols_opt)
+        Sigma_ann_factor = cov_from_corr_vol(corr_u_factor, vol_vec_factor)
+        u_index = {t: i for i, t in enumerate(universe0)}
+        w_factor = vectorize_port(factor, u_index)
+
+        def factor_te_obj(w: np.ndarray) -> Tuple[float, float]:
+            diff = w - w_factor
+            factor_te = float(math.sqrt(max(diff @ Sigma_ann_factor @ diff, 0.0)))
+            return factor_te, factor_te
+
+        vol_bias = {t: opt_vols_for_universe.get(t, 0.0) for t in tickers_for_anchor}
+        print(f"\nOptimising for maximum tracking volatility versus the largest leaderboard factor using {opt_vol_source.upper()}-TERM vols.")
+        anchor_port = cross_entropy_optimise(
+            rng=np.random.default_rng(seed),
+            tickers=[t for t in tickers_for_anchor if t != "CASH"],
+            constraints=constraints,
+            forced=forced,
+            objective_fn=factor_te_obj,
+            u_index=u_index,
+            initial_bias=vol_bias,
+            n_rounds=rounds,
+            samples_per_round=samples,
+            maximise=True,
+            label="FactorTE",
+            polish_steps=1200,
+        )
+        factor_te = tracking_error_portfolios(anchor_port, factor, corr_u_factor, vol_vec_factor)
+        print(f"\nTE(selected {anchor_name}, largest factor) {opt_vol_source.upper()}-TERM vols (ann.): {factor_te:.6f}")
+        print(f"\nLargest-factor-relative-volatility-maximising portfolio for {anchor_name} (contest-legal, cash capped):")
+        for t, wt in sorted(anchor_port.items(), key=lambda x: x[1], reverse=True):
+            print(f"  {t:8s}  {wt * 100:6.2f}%")
+
     elif objective == "win":
         players_for_obj = list(players)
         values_for_obj = dict(values)
@@ -1521,7 +1617,7 @@ def run_all(
             print(f"  {t:8s}  {wt * 100:6.2f}%")
 
     else:
-        raise ValueError("--objective must be 'te', 'max_te', 'win', 'vol', or 'current'.")
+        raise ValueError("--objective must be 'te', 'max_te', 'factor_te', 'win', 'vol', or 'current'.")
 
     if anchor_port is not None and not is_legal_portfolio(anchor_port, constraints, forced):
         raise RuntimeError(f"Internal error: chosen {anchor_name} portfolio violates constraints.")
@@ -1530,7 +1626,7 @@ def run_all(
         return
 
     # Final full contest simulation.  If a selected portfolio exists, it replaces the
-    # anchor when the anchor is already in the leaderboard.  For TE/WIN, a synthetic
+    # anchor when the anchor is already in the leaderboard.  For TE/MAX_TE/FACTOR_TE/WIN, a synthetic
     # entrant can still be added when selected_value is supplied or can be inferred.
     players_sim = list(players)
     values_sim = dict(values)
@@ -1538,7 +1634,7 @@ def run_all(
 
     if anchor_port is not None:
         if anchor_name not in players_sim:
-            if objective in {"te", "max_te", "win"}:
+            if objective in {"te", "max_te", "factor_te", "win"}:
                 players_sim.append(anchor_name)
                 values_sim[anchor_name] = selected_start_value()
                 print(f"\nAdded synthetic entrant {anchor_name!r} for final simulation with starting value {values_sim[anchor_name]:.2f}.")
@@ -1641,7 +1737,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Combined contest optimiser.")
     parser.add_argument("--config", type=str, default=None, help="Configuration file. Default: config.yaml if it exists.")
 
-    parser.add_argument("--objective", choices=["te", "max_te", "win", "vol", "current"], default=None, help="Portfolio objective.")
+    parser.add_argument("--objective", choices=["te", "max_te", "factor_te", "win", "vol", "current"], default=None, help="Portfolio objective.")
     parser.add_argument("--anchor", type=str, default=None, help="Selected portfolio name. Overrides the config file.")
     parser.add_argument("--selected-value", type=float, default=None, help="Starting value for the selected portfolio if it is not in the leaderboard.")
     parser.add_argument("--stocklist", type=str, default=None, help="CSV containing Symbol and optional Alternative Symbol columns.")
@@ -1655,12 +1751,12 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=None, help="RNG seed.")
 
     parser.add_argument("--wp_vol_source", choices=["short", "medium"], default=None, help="Vols used only when --objective te or max_te needs to compute win probabilities.")
-    parser.add_argument("--opt_vol_source", choices=["short", "medium"], default=None, help="Vols used for TE, MAX_TE, WIN, or VOL optimisation.")
+    parser.add_argument("--opt_vol_source", choices=["short", "medium"], default=None, help="Vols used for TE, MAX_TE, FACTOR_TE, WIN, or VOL optimisation.")
     parser.add_argument("--sim_vol_source", choices=["short", "medium"], default=None, help="Vols used for final full contest simulation.")
 
     parser.add_argument("--inner_sims", type=int, default=None, help="Inner simulations for --objective win.")
-    parser.add_argument("--rounds", type=int, default=None, help="Optimisation rounds for --objective te, max_te, or win.")
-    parser.add_argument("--samples", type=int, default=None, help="Samples per round for --objective te, max_te, or win.")
+    parser.add_argument("--rounds", type=int, default=None, help="Optimisation rounds for --objective te, max_te, factor_te, or win.")
+    parser.add_argument("--samples", type=int, default=None, help="Samples per round for --objective te, max_te, factor_te, or win.")
 
     parser.add_argument("--exclude", type=str, default=None, help="Comma-separated tickers to exclude from optimisation universe.")
     parser.add_argument("--forced", type=str, default=None, help='Forced holdings, e.g. "AAPL=25,NVDA=15,SHOP=10".')
