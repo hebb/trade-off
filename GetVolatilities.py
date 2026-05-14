@@ -1354,7 +1354,7 @@ def finalize_with_earnings(result, hist, row, primary_exchange: str, status_attr
     return apply_earnings_override(result, hist, override_kind, trading_days)
 
 
-def attach_contest_iv(result, symbol, spot, primary_exchange: str, contest_end_date: Optional[dt.date]):
+def attach_contest_iv(result, symbol, spot, hist, primary_exchange: str, contest_end_date: Optional[dt.date]):
     result.contest_iv = None
     result.contest_expiry = ""
 
@@ -1376,6 +1376,28 @@ def attach_contest_iv(result, symbol, spot, primary_exchange: str, contest_end_d
         result.contest_iv = mx_iv
         result.contest_expiry = mx_expiry or ""
         result.contest_iv_status = f"yfinance: {yf_status}; mx: {mx_status}"
+        return result
+
+    hv = annualized_hist_vol(hist)
+
+    if hv is not None:
+        result.contest_iv = hv
+        result.contest_expiry = ""
+        result.contest_iv_status = (
+            "historical fallback after contest option IV failed; "
+            f"yfinance: {yf_status}; mx: {mx_status}"
+        )
+        if not result.hv_status or result.hv_status == "not attempted":
+            result.hv_status = "ok"
+        return result
+
+    if result.iv is not None:
+        result.contest_iv = result.iv
+        result.contest_expiry = result.expiry
+        result.contest_iv_status = (
+            "fallback to primary volatility because contest option IV and "
+            f"historical fallback failed; yfinance: {yf_status}; mx: {mx_status}"
+        )
         return result
 
     result.contest_iv_status = f"yfinance: {yf_status}; mx: {mx_status}"
@@ -1407,7 +1429,7 @@ def resolve(symbol, row, contest_end_date: Optional[dt.date] = None):
                 result.final_status = "ok"
                 result.mx_status = "not attempted"
                 result.hv_status = "not attempted"
-                attach_contest_iv(result, symbol, spot, primary_exchange, contest_end_date)
+                attach_contest_iv(result, symbol, spot, hist, primary_exchange, contest_end_date)
                 return finalize_with_earnings(result, hist, row, primary_exchange, "yf_status")
         else:
             result.yf_status = "no usable yfinance spot"
@@ -1426,7 +1448,7 @@ def resolve(symbol, row, contest_end_date: Optional[dt.date] = None):
             result.source = "mx_weighted"
             result.final_status = "ok"
             result.hv_status = "not attempted"
-            attach_contest_iv(result, symbol, spot, primary_exchange, contest_end_date)
+            attach_contest_iv(result, symbol, spot, hist, primary_exchange, contest_end_date)
             return finalize_with_earnings(result, hist, row, primary_exchange, "mx_status")
     except Exception as e:
         result.mx_status = f"mx failed: {e}"
@@ -1442,13 +1464,13 @@ def resolve(symbol, row, contest_end_date: Optional[dt.date] = None):
             result.forward_expiry = ""
             result.source = "historical"
             result.final_status = "fallback used"
-            attach_contest_iv(result, symbol, spot, primary_exchange, contest_end_date)
+            attach_contest_iv(result, symbol, spot, hist, primary_exchange, contest_end_date)
             return finalize_with_earnings(result, hist, row, primary_exchange, "hv_status")
     except Exception as e:
         result.hv_status = f"hv failed: {e}"
 
     result.final_status = "all methods failed"
-    attach_contest_iv(result, symbol, spot, primary_exchange, contest_end_date)
+    attach_contest_iv(result, symbol, spot, hist, primary_exchange, contest_end_date)
     attach_earnings_debug(result, empty_earnings_debug())
     return apply_earnings_override(result, hist, EARNINGS_NONE)
 
