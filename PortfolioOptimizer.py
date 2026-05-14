@@ -21,8 +21,9 @@ Selectable objectives:
 Inputs and model choices:
   - Default correlation file: correlation_matrix.csv.
   - Volatility sources are selected with --wp_vol_source, --opt_vol_source, and
-    --sim_vol_source.  The optimisation volatility source is used for te,
-    max_te, factor_te, win, and vol.
+    --sim_vol_source.  Both sources are read from one volatility CSV by default:
+    short uses Implied Volatility, medium uses Contest Implied Volatility.  The
+    optimisation volatility source is used for te, max_te, factor_te, win, and vol.
   - The weighted benchmark is calculated only for te and max_te.
   - Leaderboard factors are calculated only for factor_te, using a selected
     right singular vector of current non-anchor leaderboard portfolio weights.
@@ -250,7 +251,11 @@ def load_corr_matrix(path: str) -> pd.DataFrame:
     return pd.DataFrame(arr, index=corr.index, columns=corr.columns)
 
 
-def load_vols(path: str, symbol_alias_map: Optional[Dict[str, str]] = None) -> Dict[str, float]:
+def load_vols(
+    path: str,
+    symbol_alias_map: Optional[Dict[str, str]] = None,
+    volatility_col: str = "Implied Volatility",
+) -> Dict[str, float]:
     vols = pd.read_csv(path)
     ticker_col = None
     for candidate in ["Ticker", "Symbol", "Underlying"]:
@@ -258,16 +263,16 @@ def load_vols(path: str, symbol_alias_map: Optional[Dict[str, str]] = None) -> D
             ticker_col = candidate
             break
 
-    if ticker_col is None or "Implied Volatility" not in vols.columns:
+    if ticker_col is None or volatility_col not in vols.columns:
         raise ValueError(
-            f"Vol file {path} missing expected columns. Expected Implied Volatility and one of Ticker / Symbol / Underlying. "
+            f"Vol file {path} missing expected columns. Expected {volatility_col} and one of Ticker / Symbol / Underlying. "
             f"Found: {list(vols.columns)}"
         )
 
     out: Dict[str, float] = {}
     for _, row in vols.iterrows():
         raw = row.get(ticker_col, "")
-        iv_raw = row.get("Implied Volatility", "")
+        iv_raw = row.get(volatility_col, "")
         if pd.isna(raw) or not str(raw).strip() or pd.isna(iv_raw) or not str(iv_raw).strip():
             continue
         try:
@@ -1369,8 +1374,7 @@ def run_all(
     objective: str,
     leaderboard_csv: str,
     corr_csv: str,
-    vol_short_csv: str,
-    vol_medium_csv: str,
+    volatility_csv: str,
     days_remaining: int,
     n_sims: int,
     seed: int,
@@ -1396,8 +1400,16 @@ def run_all(
         print(f"Loaded {n_aliases} alternative-symbol mapping(s) from {stocklist_csv}")
 
     corr = load_corr_matrix(corr_csv)
-    vol_short = load_vols(vol_short_csv, symbol_alias_map=symbol_alias_map)
-    vol_med = load_vols(vol_medium_csv, symbol_alias_map=symbol_alias_map)
+    vol_short = load_vols(
+        volatility_csv,
+        symbol_alias_map=symbol_alias_map,
+        volatility_col="Implied Volatility",
+    )
+    vol_med = load_vols(
+        volatility_csv,
+        symbol_alias_map=symbol_alias_map,
+        volatility_col="Contest Implied Volatility",
+    )
 
     vols_wp = vol_short if wp_vol_source == "short" else vol_med
     vols_opt = vol_short if opt_vol_source == "short" else vol_med
@@ -1756,8 +1768,7 @@ if __name__ == "__main__":
     parser.add_argument("--stocklist", type=str, default=None, help="CSV containing Symbol and optional Alternative Symbol columns.")
     parser.add_argument("--leaderboard", type=str, default=None, help="Leaderboard CSV.")
     parser.add_argument("--corr-file", type=str, default=None, help="Correlation matrix CSV.")
-    parser.add_argument("--vol-file", type=str, default=None, help="Short-term volatility CSV.")
-    parser.add_argument("--vol-file2", type=str, default=None, help="Medium-term volatility CSV.")
+    parser.add_argument("--vol-file", type=str, default=None, help="Volatility CSV. Short uses Implied Volatility; medium uses Contest Implied Volatility.")
 
     parser.add_argument("--days", type=int, default=None, help="Trading days remaining.")
     parser.add_argument("--sims", type=int, default=None, help="Number of Monte Carlo simulations for final reporting.")
@@ -1796,8 +1807,7 @@ if __name__ == "__main__":
     leaderboard = str(choose(args.leaderboard, config, "files", "leaderboard_csv", "Leaderboard.csv"))
     stocklist = str(choose(args.stocklist, config, "files", "stocklist_csv", "StockList.csv"))
     corr_file = str(choose(args.corr_file, config, "files", "corr_file", "correlation_matrix.csv"))
-    vol_file = str(choose(args.vol_file, config, "files", "vol_short_csv", "Volatilities.csv"))
-    vol_file2 = str(choose(args.vol_file2, config, "files", "vol_medium_csv", "Volatilities2.csv"))
+    vol_file = str(choose(args.vol_file, config, "files", "volatility_csv", "StockList_with_IV.csv"))
     winprob_file = str(choose(args.winprob_file, config, "files", "winprob_path", "WinProbabilities_excl_anchor.csv"))
 
     days_arg = args.days
@@ -1843,8 +1853,7 @@ if __name__ == "__main__":
         objective=objective,
         leaderboard_csv=leaderboard,
         corr_csv=corr_file,
-        vol_short_csv=vol_file,
-        vol_medium_csv=vol_file2,
+        volatility_csv=vol_file,
         days_remaining=days,
         n_sims=sims,
         seed=seed,

@@ -21,8 +21,6 @@ except Exception:
     mcal = None
 
 
-INPUT_FILE = "StockList_with_earnings.csv" if os.path.exists("StockList_with_earnings.csv") else "StockList.csv"
-OUTPUT_FILE = "StockList_with_IV.csv"
 CONFIG_FILE = "config.yaml"
 
 RISK_FREE_RATE = 0.03
@@ -200,6 +198,21 @@ def cfg_get(config, section: str, key: str, default=None):
     if key in config:
         return config[key]
     return default
+
+
+def required_config_value(config, section: str, key: str) -> str:
+    value = cfg_get(config, section, key, None)
+    if value is None or not str(value).strip():
+        raise ValueError(f"config.yaml must define {section}.{key}")
+    return str(value)
+
+
+def get_input_file(config) -> str:
+    return required_config_value(config, "files", "stocklist_with_earnings_csv")
+
+
+def get_output_file(config) -> str:
+    return required_config_value(config, "files", "volatility_csv")
 
 
 def parse_config_date(value, label: str = "date") -> Optional[dt.date]:
@@ -1466,12 +1479,16 @@ def reorder_columns(df):
 def main():
     config = load_config_file(CONFIG_FILE)
     contest_end_date = get_contest_end_date(config)
+    input_file = get_input_file(config)
+    output_file = get_output_file(config)
     print(
         "contest.end_date="
         f"{contest_end_date.isoformat() if contest_end_date is not None else 'not configured'}"
     )
+    print(f"Input file: {input_file}")
+    print(f"Output file: {output_file}")
 
-    df = clean_df(INPUT_FILE)
+    df = clean_df(input_file)
 
     for i, row in df.iterrows():
         raw_symbol = row.get("Symbol", "")
@@ -1540,8 +1557,8 @@ def main():
         na_position="last",
     )
 
-    df.to_csv(OUTPUT_FILE, index=False)
-    print(f"\nWrote {OUTPUT_FILE}")
+    df.to_csv(output_file, index=False)
+    print(f"\nWrote {output_file}")
 
 
 if __name__ == "__main__":

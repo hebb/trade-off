@@ -1,9 +1,9 @@
 files:
   leaderboard_csv: Leaderboard.csv
   stocklist_csv: StockList.csv
+  stocklist_with_earnings_csv: StockList_with_earnings.csv
   corr_file: correlation_matrix.csv
-  vol_short_csv: Volatilities.csv
-  vol_medium_csv: Volatilities2.csv
+  volatility_csv: StockList_with_IV.csv
   winprob_path: WinProbabilities_excl_anchor.csv
 
 model:

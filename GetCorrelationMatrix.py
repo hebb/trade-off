@@ -1,7 +1,56 @@
 import pandas as pd
 import yfinance as yf
 import argparse
+import json
+import os
 import numpy as np
+
+CONFIG_FILE = "config.yaml"
+
+
+def load_config_file(path=CONFIG_FILE):
+    if not path or not os.path.exists(path):
+        return {}
+
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    if not text.strip():
+        return {}
+
+    if path.lower().endswith(".json"):
+        data = json.loads(text)
+    else:
+        try:
+            import yaml  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                f"Configuration file {path!r} appears to be YAML, but PyYAML is not installed. "
+                "Install it with: pip install pyyaml"
+            ) from exc
+        data = yaml.safe_load(text)
+
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Configuration file {path!r} must contain a mapping at the top level.")
+    return data
+
+
+def cfg_get(config, section, key, default=None):
+    sec = config.get(section, {})
+    if isinstance(sec, dict) and key in sec:
+        return sec[key]
+    if key in config:
+        return config[key]
+    return default
+
+
+def required_config_value(config, section, key):
+    value = cfg_get(config, section, key, None)
+    if value is None or not str(value).strip():
+        raise ValueError(f"config.yaml must define {section}.{key}")
+    return str(value)
 
 def load_tickers_from_csv(file_path):
     df = pd.read_csv(file_path)
@@ -185,10 +234,10 @@ def compute_factor_correlation(
 
 def main():
     parser = argparse.ArgumentParser(description="Compute correlation matrix of daily returns.")
-    parser.add_argument("stock_list_csv", help="Path to StockList.csv")
+    parser.add_argument("--config", default=None, help="Configuration file. Default: config.yaml if it exists.")
     parser.add_argument("--start", default="2023-01-01")
     parser.add_argument("--end", default=None)
-    parser.add_argument("--output", default="correlation_matrix.csv")
+    parser.add_argument("--output", default=None, help="Output CSV. Defaults to files.corr_file from config.yaml.")
     parser.add_argument("--method", choices=["factor", "raw"], default="factor",
                         help="Correlation estimator. 'factor' uses PCA factors plus idiosyncratic variance.")
     parser.add_argument("--factors", type=int, default=None,
@@ -204,8 +253,16 @@ def main():
 
     args = parser.parse_args()
 
-    tickers = load_tickers_from_csv(args.stock_list_csv)
-    print(f"Loaded {len(tickers)} tickers")
+    config_path = args.config
+    if config_path is None and os.path.exists(CONFIG_FILE):
+        config_path = CONFIG_FILE
+    config = load_config_file(config_path) if config_path else {}
+
+    stock_list_csv = required_config_value(config, "files", "stocklist_csv")
+    output = args.output if args.output is not None else required_config_value(config, "files", "corr_file")
+
+    tickers = load_tickers_from_csv(stock_list_csv)
+    print(f"Loaded {len(tickers)} tickers from {stock_list_csv}")
 
     prices = download_prices(tickers, args.start, args.end)
     print(f"Price table shape: {prices.shape}")
@@ -227,8 +284,8 @@ def main():
         print(f"Estimated factor covariance with {factor_count} factor(s)")
     print(f"Correlation matrix shape: {corr.shape}")
 
-    corr.to_csv(args.output)
-    print(f"Saved correlation matrix to {args.output}")
+    corr.to_csv(output)
+    print(f"Saved correlation matrix to {output}")
 
 if __name__ == "__main__":
     main()
