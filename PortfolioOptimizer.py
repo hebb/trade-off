@@ -18,14 +18,15 @@ Selectable objectives:
   --objective factor_te  maximise or minimise tracking volatility relative to a leaderboard factor
   --objective win        maximise the anchor's simulated probability of finishing first
   --objective vol        maximise absolute portfolio volatility
+  --objective vol_te     maximise a weighted sum of absolute volatility and max_te
   --objective current    use the anchor portfolio from the configured leaderboard, if present
 
 Inputs and model choices:
   - Volatility sources are selected with --wp_vol_source, --opt_vol_source, and
     --sim_vol_source.  Both sources are read from one volatility CSV by default:
     short uses Implied Volatility, medium uses Contest Implied Volatility.  The
-    optimisation volatility source is used for te, max_te, factor_te, win, and vol.
-  - The weighted benchmark is calculated only for te and max_te.
+    optimisation volatility source is used for te, max_te, vol_te, factor_te, win, and vol.
+  - The weighted benchmark is calculated only for te, max_te, and vol_te.
   - Leaderboard factors are calculated only for factor_te, using a selected
     right singular vector of current non-anchor leaderboard portfolio weights.
     --factor-index chooses the 1-based SVD factor rank.  Absolute loadings are
@@ -35,15 +36,15 @@ Inputs and model choices:
 Constraints:
   - Contest rules: at least 5 stocks; each stock 5%-25%; 1% increments;
     cash allowed up to --max_cash; no shorting.
-  - --exclude applies to te, max_te, factor_te, win, and vol.
-  - --forced applies to te, max_te, factor_te, win, and vol, e.g. --forced "AAPL=25,NVDA=10".
+  - --exclude applies to te, max_te, vol_te, factor_te, win, and vol.
+  - --forced applies to te, max_te, vol_te, factor_te, win, and vol, e.g. --forced "AAPL=25,NVDA=10".
   - Forced holdings are allowed even when the same ticker appears in --exclude.
 
 Simulation:
   - Final Monte Carlo reporting uses --sim_vol_source.
   - When the anchor is present in the configured leaderboard, the selected portfolio is
     inserted and finish probabilities are reported after optimisation, including
-    for vol, max_te, and factor_te.
+    for vol, max_te, vol_te, and factor_te.
   - If the anchor is absent, objectives that can still be evaluated do not fail
     solely for that reason; anchor-specific final reporting is skipped when the
     selected portfolio cannot be inserted.
@@ -1410,6 +1411,8 @@ def run_all(
     stocklist_csv: str,
     factor_index: int = 1,
     factor_te_direction: str = "max",
+    vol_te_vol_weight: float = 0.5,
+    vol_te_te_weight: float = 0.5,
     selected_value: Optional[float] = None,
 ) -> None:
     symbol_alias_map = load_symbol_alias_map(stocklist_csv)
@@ -1500,7 +1503,7 @@ def run_all(
             anchor_port = None
             print(f"\nAnchor {anchor_name!r} was not found in the configured leaderboard; simulating the current leaderboard as-is.")
 
-    elif objective in {"te", "max_te"}:
+    elif objective in {"te", "max_te", "vol_te"}:
         players_ex = [p for p in players if p != anchor_name]
         values_ex = {p: values[p] for p in players_ex}
         universe_ex = make_universe_from_players(players_ex, ports)
@@ -1542,31 +1545,64 @@ def run_all(
             te = float(math.sqrt(max(d @ Sigma_ann_te @ d, 0.0)))
             return te, te
 
-        maximise_te = objective == "max_te"
-        if maximise_te:
+        def vol_te_obj(w: np.ndarray) -> Tuple[float, float]:
+            d = w - w_b
+            te = float(math.sqrt(max(d @ Sigma_ann_te @ d, 0.0)))
+            vol = float(math.sqrt(max(w @ Sigma_ann_te @ w, 0.0)))
+            score = vol_te_vol_weight * vol + vol_te_te_weight * te
+            return score, score
+
+        maximise_te = objective in {"max_te", "vol_te"}
+        if objective == "vol_te":
+            if vol_te_vol_weight < 0 or vol_te_te_weight < 0:
+                raise ValueError("--vol-te-vol-weight and --vol-te-te-weight must be non-negative.")
+            if vol_te_vol_weight <= 0 and vol_te_te_weight <= 0:
+                raise ValueError("At least one of --vol-te-vol-weight or --vol-te-te-weight must be positive.")
+            initial_bias = {t: opt_vols_for_universe.get(t, 0.0) for t in tickers_for_anchor}
+            print(
+                f"\nOptimising for VOL/TE blend using {opt_vol_source.upper()}-TERM vols "
+                f"(score={vol_te_vol_weight:g}*vol + {vol_te_te_weight:g}*TE)."
+            )
+            objective_fn = vol_te_obj
+            label = "VolTE"
+        elif maximise_te:
             initial_bias = {t: opt_vols_for_universe.get(t, 0.0) for t in tickers_for_anchor}
             print(f"\nOptimising for maximum tracking error using {opt_vol_source.upper()}-TERM vols.")
+            objective_fn = te_obj
+            label = "TE"
         else:
             initial_bias = bench
             print(f"\nOptimising for minimum tracking error using {opt_vol_source.upper()}-TERM vols.")
+            objective_fn = te_obj
+            label = "TE"
 
         anchor_port = cross_entropy_optimise(
             rng=np.random.default_rng(seed),
             tickers=[t for t in tickers_for_anchor if t != "CASH"],
             constraints=constraints,
             forced=forced,
-            objective_fn=te_obj,
+            objective_fn=objective_fn,
             u_index=u_index,
             initial_bias=initial_bias,
             n_rounds=rounds,
             samples_per_round=samples,
             maximise=maximise_te,
-            label="TE",
+            label=label,
             polish_steps=1200,
         )
         te_vs_bench = tracking_error_portfolios(anchor_port, bench, corr_u_te, vol_vec_te)
         print(f"\nTE(selected {anchor_name}, benchmark) {opt_vol_source.upper()}-TERM vols (ann.): {te_vs_bench:.6f}")
-        portfolio_label = "Tracking-error-maximising" if maximise_te else "Tracking-error-minimising"
+        if objective == "vol_te":
+            w_anchor_te = vectorize_port(anchor_port, u_index)
+            selected_vol = float(math.sqrt(max(w_anchor_te @ Sigma_ann_te @ w_anchor_te, 0.0)))
+            selected_score = vol_te_vol_weight * selected_vol + vol_te_te_weight * te_vs_bench
+            print(f"Vol(selected {anchor_name}) {opt_vol_source.upper()}-TERM vols (ann.): {selected_vol:.6f}")
+            print(f"VOL/TE blend score: {selected_score:.6f}")
+        portfolio_label = {
+            "te": "Tracking-error-minimising",
+            "max_te": "Tracking-error-maximising",
+            "vol_te": "Volatility-and-tracking-error-maximising",
+        }[objective]
         print(f"\n{portfolio_label} portfolio for {anchor_name} (contest-legal, cash capped):")
         for t, wt in sorted(anchor_port.items(), key=lambda x: x[1], reverse=True):
             print(f"  {t:8s}  {wt * 100:6.2f}%")
@@ -1669,7 +1705,7 @@ def run_all(
             print(f"  {t:8s}  {wt * 100:6.2f}%")
 
     else:
-        raise ValueError("--objective must be 'te', 'max_te', 'factor_te', 'win', 'vol', or 'current'.")
+        raise ValueError("--objective must be 'te', 'max_te', 'vol_te', 'factor_te', 'win', 'vol', or 'current'.")
 
     if anchor_port is not None and not is_legal_portfolio(anchor_port, constraints, forced):
         raise RuntimeError(f"Internal error: chosen {anchor_name} portfolio violates constraints.")
@@ -1678,7 +1714,7 @@ def run_all(
         return
 
     # Final full contest simulation.  If a selected portfolio exists, it replaces the
-    # anchor when the anchor is already in the leaderboard.  For TE/MAX_TE/FACTOR_TE/WIN, a synthetic
+    # anchor when the anchor is already in the leaderboard.  For TE/MAX_TE/VOL_TE/FACTOR_TE/WIN, a synthetic
     # entrant can still be added when selected_value is supplied or can be inferred.
     players_sim = list(players)
     values_sim = dict(values)
@@ -1686,7 +1722,7 @@ def run_all(
 
     if anchor_port is not None:
         if anchor_name not in players_sim:
-            if objective in {"te", "max_te", "factor_te", "win"}:
+            if objective in {"te", "max_te", "vol_te", "factor_te", "win"}:
                 players_sim.append(anchor_name)
                 values_sim[anchor_name] = selected_start_value()
                 print(f"\nAdded synthetic entrant {anchor_name!r} for final simulation with starting value {values_sim[anchor_name]:.2f}.")
@@ -1796,7 +1832,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Combined contest optimiser.")
     parser.add_argument("--config", type=str, default=None, help="Configuration file. Default: config.yaml if it exists.")
 
-    parser.add_argument("--objective", choices=["te", "max_te", "factor_te", "win", "vol", "current"], default=None, help="Portfolio objective.")
+    parser.add_argument("--objective", choices=["te", "max_te", "vol_te", "factor_te", "win", "vol", "current"], default=None, help="Portfolio objective.")
     parser.add_argument("--anchor", type=str, default=None, help="Selected portfolio name. Overrides the config file.")
     parser.add_argument("--selected-value", type=float, default=None, help="Starting value for the selected portfolio if it is not in the leaderboard.")
     parser.add_argument("--stocklist", type=str, default=None, help="CSV containing Symbol and optional Alternative Symbol columns.")
@@ -1808,27 +1844,29 @@ if __name__ == "__main__":
     parser.add_argument("--sims", type=int, default=None, help="Number of Monte Carlo simulations for final reporting.")
     parser.add_argument("--seed", type=int, default=None, help="RNG seed.")
 
-    parser.add_argument("--wp_vol_source", choices=["short", "medium"], default=None, help="Vols used only when --objective te or max_te needs to compute win probabilities.")
-    parser.add_argument("--opt_vol_source", choices=["short", "medium"], default=None, help="Vols used for TE, MAX_TE, FACTOR_TE, WIN, or VOL optimisation.")
+    parser.add_argument("--wp_vol_source", choices=["short", "medium"], default=None, help="Vols used only when --objective te, max_te, or vol_te needs to compute win probabilities.")
+    parser.add_argument("--opt_vol_source", choices=["short", "medium"], default=None, help="Vols used for TE, MAX_TE, VOL_TE, FACTOR_TE, WIN, or VOL optimisation.")
     parser.add_argument("--sim_vol_source", choices=["short", "medium"], default=None, help="Vols used for final full contest simulation.")
 
     parser.add_argument("--inner_sims", type=int, default=None, help="Inner simulations for --objective win.")
-    parser.add_argument("--rounds", type=int, default=None, help="Optimisation rounds for --objective te, max_te, factor_te, or win.")
-    parser.add_argument("--samples", type=int, default=None, help="Samples per round for --objective te, max_te, factor_te, or win.")
+    parser.add_argument("--rounds", type=int, default=None, help="Optimisation rounds for --objective te, max_te, vol_te, factor_te, or win.")
+    parser.add_argument("--samples", type=int, default=None, help="Samples per round for --objective te, max_te, vol_te, factor_te, or win.")
     parser.add_argument("--factor-index", type=int, default=None, help="1-based leaderboard SVD factor rank used by --objective factor_te.")
     parser.add_argument("--factor-te-direction", choices=["max", "min"], default=None, help="Whether --objective factor_te maximises or minimises tracking error versus the selected factor.")
+    parser.add_argument("--vol-te-vol-weight", type=float, default=None, help="Weight on absolute portfolio volatility for --objective vol_te.")
+    parser.add_argument("--vol-te-te-weight", type=float, default=None, help="Weight on benchmark tracking error for --objective vol_te.")
 
     parser.add_argument("--exclude", type=str, default=None, help="Comma-separated tickers to exclude from optimisation universe.")
     parser.add_argument("--forced", type=str, default=None, help='Forced holdings, e.g. "AAPL=25,NVDA=15,SHOP=10".')
     parser.add_argument("--max_cash", type=int, default=None, help="Maximum CASH percent allowed in anchor portfolio.")
-    parser.add_argument("--winprob-file", type=str, default=None, help="Win-probability CSV used/created only by --objective te or max_te.")
-    parser.add_argument("--weighted-benchmark-file", type=str, default=None, help="Weighted benchmark CSV written only by --objective te or max_te.")
+    parser.add_argument("--winprob-file", type=str, default=None, help="Win-probability CSV used/created only by --objective te, max_te, or vol_te.")
+    parser.add_argument("--weighted-benchmark-file", type=str, default=None, help="Weighted benchmark CSV written only by --objective te, max_te, or vol_te.")
     parser.add_argument("--contest-results-file", type=str, default=None, help="Final contest results CSV.")
     parser.add_argument(
         "--overwrite-winprob-file",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Whether TE/MAX_TE recomputes and overwrites the win-probability CSV. Use --no-overwrite-winprob-file to read it instead.",
+        help="Whether TE/MAX_TE/VOL_TE recomputes and overwrites the win-probability CSV. Use --no-overwrite-winprob-file to read it instead.",
     )
 
     args = parser.parse_args()
@@ -1868,6 +1906,8 @@ if __name__ == "__main__":
     samples = int(choose(args.samples, config, "win_objective", "samples", 450))
     factor_index = int(choose(args.factor_index, config, "run", "factor_index", 1))
     factor_te_direction = str(choose(args.factor_te_direction, config, "run", "factor_te_direction", "max")).strip().lower()
+    vol_te_vol_weight = float(choose(args.vol_te_vol_weight, config, "vol_te_objective", "vol_weight", 0.5))
+    vol_te_te_weight = float(choose(args.vol_te_te_weight, config, "vol_te_objective", "te_weight", 0.5))
 
     exclude = str(choose(args.exclude, config, "run", "exclude", ""))
     forced = str(choose(args.forced, config, "run", "forced", ""))
@@ -1885,6 +1925,10 @@ if __name__ == "__main__":
         raise ValueError("--factor-index must be a positive integer.")
     if factor_te_direction not in {"max", "min"}:
         raise ValueError(f"factor_te_direction must be one of ['max', 'min']; got {factor_te_direction!r}.")
+    if vol_te_vol_weight < 0 or vol_te_te_weight < 0:
+        raise ValueError("vol_te weights must be non-negative.")
+    if objective == "vol_te" and vol_te_vol_weight <= 0 and vol_te_te_weight <= 0:
+        raise ValueError("At least one vol_te weight must be positive.")
 
     print(
         f"Objective: {objective} | anchor={anchor} | corr={corr_file} | "
@@ -1918,5 +1962,7 @@ if __name__ == "__main__":
         stocklist_csv=stocklist,
         factor_index=factor_index,
         factor_te_direction=factor_te_direction,
+        vol_te_vol_weight=vol_te_vol_weight,
+        vol_te_te_weight=vol_te_te_weight,
         selected_value=selected_value,
     )
