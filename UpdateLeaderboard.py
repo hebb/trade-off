@@ -13,6 +13,8 @@ rankings.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import math
 import os
@@ -68,11 +70,6 @@ def strip_canadian_suffix(t: str) -> str:
 def is_canadian_symbol(t: str) -> bool:
     t = canonical_ticker(t)
     return t.endswith(CAD_MARKERS)
-
-
-def is_canadian_exchange(exchange: object) -> bool:
-    ex = str(exchange or "").strip().upper()
-    return ex in {"TSE", "TSX", "TSXV", "TSX-V", "CVE", "NEO"}
 
 
 def parse_holdings(value: object) -> List[str]:
@@ -140,29 +137,17 @@ def load_stock_list(path: str) -> pd.DataFrame:
     return df
 
 
-def matching_stock_rows(stock_list: pd.DataFrame, holding: str) -> pd.DataFrame:
+def matching_stock_rows(stock_list: pd.DataFrame, holding: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     if stock_list.empty:
-        return stock_list
+        return stock_list, stock_list
 
     holding = canonical_ticker(holding)
-    base = strip_canadian_suffix(holding)
     symbol = stock_list["Symbol"].fillna("").map(canonical_ticker)
     alt = stock_list["Alternative Symbol"].fillna("").map(canonical_ticker)
     symbol_base = symbol.map(strip_canadian_suffix)
-    alt_base = alt.map(strip_canadian_suffix)
-
-    return stock_list[
-        (symbol == holding)
-        | (alt == holding)
-        | (symbol_base == base)
-        | (alt_base == base)
-    ]
-
-
-def add_unique(items: List[str], value: object) -> None:
-    text = canonical_ticker(value)
-    if text and text != "NAN" and text not in items:
-        items.append(text)
+    alt_rows = stock_list[alt == holding]
+    symbol_rows = stock_list[(symbol == holding) | ((symbol_base == holding) & symbol.map(is_canadian_symbol))]
+    return alt_rows, symbol_rows
 
 
 def parse_ticker_overrides(values: Optional[List[str]]) -> Dict[str, str]:
@@ -183,7 +168,6 @@ def parse_ticker_overrides(values: Optional[List[str]]) -> Dict[str, str]:
 
 def ticker_candidates(holding: str, stock_list: pd.DataFrame, overrides: Optional[Dict[str, str]] = None) -> List[Tuple[str, str, str]]:
     holding = canonical_ticker(holding)
-    base = strip_canadian_suffix(holding)
     candidates: List[Tuple[str, str, str]] = []
     overrides = overrides or {}
 
@@ -191,35 +175,31 @@ def ticker_candidates(holding: str, stock_list: pd.DataFrame, overrides: Optiona
         symbol = canonical_ticker(symbol)
         if not symbol or symbol == "NAN":
             return
-        item = (symbol, currency, reason)
-        if item not in candidates:
-            candidates.append(item)
+        if all(existing[0] != symbol for existing in candidates):
+            candidates.append((symbol, currency, reason))
 
     override = overrides.get(holding)
     if override:
         add(override, "CAD" if is_canadian_symbol(override) else "USD", "ticker override")
 
-    rows = matching_stock_rows(stock_list, holding)
-    for _, row in rows.iterrows():
-        symbol = canonical_ticker(row.get("Symbol", ""))
-        alt = canonical_ticker(row.get("Alternative Symbol", ""))
-        canadian = is_canadian_exchange(row.get("Primary Exchange", "")) or is_canadian_symbol(symbol)
+    alt_rows, symbol_rows = matching_stock_rows(stock_list, holding)
 
-        if canadian:
-            add(holding if is_canadian_symbol(holding) else f"{base}.TO", "CAD", "stock-list Canadian exchange")
-            if alt:
-                add(alt if is_canadian_symbol(alt) else f"{strip_canadian_suffix(alt)}.TO", "CAD", "stock-list alternate Canadian")
+    if not alt_rows.empty:
+        for _, row in alt_rows.iterrows():
+            symbol = canonical_ticker(row.get("Symbol", ""))
+            add(f"{holding}.TO", "CAD", "stock-list Canadian alternate")
             if symbol:
-                add(symbol if is_canadian_symbol(symbol) else f"{strip_canadian_suffix(symbol)}.TO", "CAD", "stock-list symbol Canadian")
-        else:
+                add(symbol, "CAD" if is_canadian_symbol(symbol) else "USD", "stock-list fallback symbol")
+        return candidates
+
+    if not symbol_rows.empty:
+        for _, row in symbol_rows.iterrows():
+            symbol = canonical_ticker(row.get("Symbol", ""))
             if symbol:
-                add(symbol, "USD", "stock-list symbol")
-            if alt:
-                add(alt, "USD", "stock-list alternate")
+                add(symbol, "CAD" if is_canadian_symbol(symbol) else "USD", "stock-list symbol")
+        return candidates
 
     add(holding, "CAD" if is_canadian_symbol(holding) else "USD", "leaderboard symbol")
-    if not is_canadian_symbol(holding) and rows.empty:
-        add(f"{base}.TO", "CAD", "Canadian suffix fallback")
     return candidates
 
 
@@ -239,36 +219,45 @@ def normalize_download_frame(raw: pd.DataFrame, symbols: List[str]) -> pd.DataFr
     return raw[[field]].rename(columns={field: name})
 
 
-def fetch_price_history(symbols: Iterable[str], period: str) -> pd.DataFrame:
+def fetch_price_history(symbols: Iterable[str], period: str, quiet: bool = True) -> pd.DataFrame:
     symbols = sorted(set(s for s in symbols if s))
     if not symbols:
         return pd.DataFrame()
 
-    raw = yf.download(
-        tickers=symbols,
-        period=period,
-        interval="1d",
-        auto_adjust=False,
-        actions=False,
-        progress=False,
-        group_by="column",
-        threads=True,
-    )
+    kwargs = {
+        "tickers": symbols,
+        "period": period,
+        "interval": "1d",
+        "auto_adjust": False,
+        "actions": False,
+        "progress": False,
+        "group_by": "column",
+        "threads": True,
+    }
+    if quiet:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            raw = yf.download(**kwargs)
+    else:
+        raw = yf.download(**kwargs)
     closes = normalize_download_frame(raw, symbols)
     closes.index = pd.to_datetime(closes.index).tz_localize(None).normalize()
     closes = closes.apply(pd.to_numeric, errors="coerce")
     return closes.dropna(axis=1, how="all")
 
 
+def merge_closes(left: pd.DataFrame, right: pd.DataFrame) -> pd.DataFrame:
+    if left.empty:
+        return right.copy()
+    if right.empty:
+        return left.copy()
+
+    out = pd.concat([left, right], axis=1)
+    out = out.loc[:, ~out.columns.duplicated(keep="last")]
+    return out.sort_index()
+
+
 def has_two_closes(closes: pd.DataFrame, symbol: str) -> bool:
     return symbol in closes.columns and closes[symbol].dropna().shape[0] >= 2
-
-
-def resolve_ticker(holding: str, stock_list: pd.DataFrame, closes: pd.DataFrame, overrides: Optional[Dict[str, str]] = None) -> Optional[ResolvedTicker]:
-    for symbol, currency, reason in ticker_candidates(holding, stock_list, overrides):
-        if has_two_closes(closes, symbol):
-            return ResolvedTicker(holding=holding, yahoo_symbol=symbol, currency=currency, reason=reason)
-    return None
 
 
 def latest_pair(series: pd.Series) -> Tuple[pd.Timestamp, pd.Timestamp, float, float]:
@@ -291,20 +280,44 @@ def fx_gross_for_dates(fx: pd.Series, start_date: pd.Timestamp, end_date: pd.Tim
 def compute_holding_returns(
     holdings: Iterable[str],
     stock_list: pd.DataFrame,
-    closes: pd.DataFrame,
+    period: str,
     fx_ticker: str,
     overrides: Optional[Dict[str, str]] = None,
 ) -> Tuple[Dict[str, ReturnResult], List[str]]:
+    holdings = sorted(set(holdings))
+    candidate_map = {holding: ticker_candidates(holding, stock_list, overrides) for holding in holdings}
+    max_candidates = max((len(candidates) for candidates in candidate_map.values()), default=0)
+    closes = fetch_price_history([fx_ticker], period)
+    resolved_by_holding: Dict[str, ResolvedTicker] = {}
+    unresolved = set(holdings)
+
+    for candidate_idx in range(max_candidates):
+        symbols = []
+        for holding in sorted(unresolved):
+            candidates = candidate_map.get(holding, [])
+            if candidate_idx < len(candidates):
+                symbols.append(candidates[candidate_idx][0])
+
+        closes = merge_closes(closes, fetch_price_history(symbols, period))
+
+        for holding in sorted(list(unresolved)):
+            for symbol, currency, reason in candidate_map.get(holding, [])[: candidate_idx + 1]:
+                if has_two_closes(closes, symbol):
+                    resolved_by_holding[holding] = ResolvedTicker(
+                        holding=holding,
+                        yahoo_symbol=symbol,
+                        currency=currency,
+                        reason=reason,
+                    )
+                    unresolved.remove(holding)
+                    break
+
     fx_series = closes[fx_ticker] if fx_ticker in closes.columns else pd.Series(dtype=float, name=fx_ticker)
     results: Dict[str, ReturnResult] = {}
-    missing: List[str] = []
+    missing = sorted(unresolved)
 
-    for holding in sorted(set(holdings)):
-        resolved = resolve_ticker(holding, stock_list, closes, overrides)
-        if resolved is None:
-            missing.append(holding)
-            continue
-
+    for holding in sorted(resolved_by_holding):
+        resolved = resolved_by_holding[holding]
         d0, d1, p0, p1 = latest_pair(closes[resolved.yahoo_symbol])
         local_gross = p1 / p0
         fx_gross = 1.0
@@ -397,15 +410,6 @@ def returns_to_frame(returns: Dict[str, ReturnResult], missing: List[str]) -> pd
             }
         )
     return pd.DataFrame(rows).sort_values(["status", "holding"])
-
-
-def collect_all_candidate_symbols(holdings: Iterable[str], stock_list: pd.DataFrame, fx_ticker: str, overrides: Optional[Dict[str, str]] = None) -> List[str]:
-    symbols: List[str] = []
-    for holding in holdings:
-        for symbol, _, _ in ticker_candidates(holding, stock_list, overrides):
-            add_unique(symbols, symbol)
-    add_unique(symbols, fx_ticker)
-    return symbols
 
 
 def load_config_file(path: str) -> Dict[str, object]:
@@ -503,10 +507,8 @@ def main() -> None:
     stock_list = load_stock_list(stock_list_path)
     overrides = parse_ticker_overrides(ticker_overrides)
     holdings = sorted({h for value in leaderboard["Holdings"] for h in parse_holdings(value)})
-    symbols = collect_all_candidate_symbols(holdings, stock_list, fx_ticker, overrides)
-    closes = fetch_price_history(symbols, period)
 
-    returns, missing = compute_holding_returns(holdings, stock_list, closes, fx_ticker, overrides)
+    returns, missing = compute_holding_returns(holdings, stock_list, period, fx_ticker, overrides)
     if missing and not allow_missing:
         raise ValueError(
             "Missing price history for holdings: "
