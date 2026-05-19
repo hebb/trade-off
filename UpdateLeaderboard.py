@@ -251,7 +251,7 @@ def merge_closes(left: pd.DataFrame, right: pd.DataFrame) -> pd.DataFrame:
     if right.empty:
         return left.copy()
 
-    out = pd.concat([left, right], axis=1)
+    out = pd.concat([left, right], axis=1, sort=False)
     out = out.loc[:, ~out.columns.duplicated(keep="last")]
     return out.sort_index()
 
@@ -260,12 +260,25 @@ def has_two_closes(closes: pd.DataFrame, symbol: str) -> bool:
     return symbol in closes.columns and closes[symbol].dropna().shape[0] >= 2
 
 
-def latest_pair(series: pd.Series) -> Tuple[pd.Timestamp, pd.Timestamp, float, float]:
+def common_market_period(closes: pd.DataFrame, resolved: Dict[str, ResolvedTicker]) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    dates = set()
+    for item in resolved.values():
+        if item.yahoo_symbol not in closes.columns:
+            continue
+        dates.update(pd.to_numeric(closes[item.yahoo_symbol], errors="coerce").dropna().index)
+
+    dates_sorted = sorted(pd.Timestamp(d) for d in dates)
+    if len(dates_sorted) < 2:
+        raise ValueError("Need at least two market dates across resolved holdings.")
+    return dates_sorted[-2], dates_sorted[-1]
+
+
+def period_close_pair(series: pd.Series, start_date: pd.Timestamp, end_date: pd.Timestamp) -> Tuple[float, float, bool]:
     clean = pd.to_numeric(series, errors="coerce").dropna().sort_index()
-    if clean.shape[0] < 2:
-        raise ValueError(f"Need at least two closes for {series.name}.")
-    start_date, end_date = clean.index[-2], clean.index[-1]
-    return start_date, end_date, float(clean.iloc[-2]), float(clean.iloc[-1])
+    start_close = float(clean.loc[start_date]) if start_date in clean.index else np.nan
+    end_close = float(clean.loc[end_date]) if end_date in clean.index else np.nan
+    traded = math.isfinite(start_close) and math.isfinite(end_close)
+    return start_close, end_close, traded
 
 
 def fx_gross_for_dates(fx: pd.Series, start_date: pd.Timestamp, end_date: pd.Timestamp) -> Tuple[float, str]:
@@ -315,28 +328,30 @@ def compute_holding_returns(
     fx_series = closes[fx_ticker] if fx_ticker in closes.columns else pd.Series(dtype=float, name=fx_ticker)
     results: Dict[str, ReturnResult] = {}
     missing = sorted(unresolved)
+    period_start, period_end = common_market_period(closes, resolved_by_holding)
 
     for holding in sorted(resolved_by_holding):
         resolved = resolved_by_holding[holding]
-        d0, d1, p0, p1 = latest_pair(closes[resolved.yahoo_symbol])
-        local_gross = p1 / p0
+        p0, p1, traded = period_close_pair(closes[resolved.yahoo_symbol], period_start, period_end)
+        local_gross = (p1 / p0) if traded else 1.0
         fx_gross = 1.0
         if resolved.currency == "USD":
-            fx_gross, _ = fx_gross_for_dates(fx_series, d0, d1)
+            fx_gross, _ = fx_gross_for_dates(fx_series, period_start, period_end)
 
         cad_gross = local_gross * fx_gross
+        status = resolved.reason if traded else f"{resolved.reason}; no trade in common period"
         results[holding] = ReturnResult(
             holding=holding,
             yahoo_symbol=resolved.yahoo_symbol,
             currency=resolved.currency,
-            start_date=d0.date().isoformat(),
-            end_date=d1.date().isoformat(),
+            start_date=period_start.date().isoformat(),
+            end_date=period_end.date().isoformat(),
             start_close=p0,
             end_close=p1,
             local_return=local_gross - 1.0,
             fx_return=fx_gross - 1.0,
             cad_return=cad_gross - 1.0,
-            status=resolved.reason,
+            status=status,
         )
 
     return results, missing
