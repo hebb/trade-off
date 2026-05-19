@@ -27,6 +27,8 @@ Inputs and model choices:
     short uses Implied Volatility, medium uses Contest Implied Volatility.  The
     optimisation volatility source is used for te, max_te, vol_te, factor_te, win, and vol.
   - The weighted benchmark is calculated only for te, max_te, and vol_te.
+    For max_te and vol_te, --te-benchmark-scope ahead can limit the benchmark
+    to non-anchor leaderboard entries with Value greater than or equal to the anchor.
   - Leaderboard factors are calculated only for factor_te, using a selected
     right singular vector of current non-anchor leaderboard portfolio weights.
     --factor-index chooses the 1-based SVD factor rank.  Absolute loadings are
@@ -522,9 +524,8 @@ def simulate_finish_probs(players: List[str], values: Dict[str, float], W_mat: n
 
         order = np.argsort(-logV, axis=1)
         pos = np.full((b, nP), 3, dtype=np.int8)
-        pos[np.arange(b), order[:, 0]] = 0
-        pos[np.arange(b), order[:, 1]] = 1
-        pos[np.arange(b), order[:, 2]] = 2
+        for rank in range(min(3, nP)):
+            pos[np.arange(b), order[:, rank]] = rank
         for i, p in enumerate(players):
             vals, cts = np.unique(pos[:, i], return_counts=True)
             for v, ct in zip(vals, cts):
@@ -1413,6 +1414,7 @@ def run_all(
     factor_te_direction: str = "max",
     vol_te_vol_weight: float = 0.5,
     vol_te_te_weight: float = 0.5,
+    te_benchmark_scope: str = "full",
     selected_value: Optional[float] = None,
 ) -> None:
     symbol_alias_map = load_symbol_alias_map(stocklist_csv)
@@ -1505,16 +1507,29 @@ def run_all(
 
     elif objective in {"te", "max_te", "vol_te"}:
         players_ex = [p for p in players if p != anchor_name]
-        values_ex = {p: values[p] for p in players_ex}
-        universe_ex = make_universe_from_players(players_ex, ports)
+        benchmark_players = players_ex
+        if objective in {"max_te", "vol_te"} and te_benchmark_scope == "ahead":
+            anchor_threshold = float(values[anchor_name]) if anchor_name in values else selected_start_value()
+            benchmark_players = [p for p in players_ex if values[p] >= anchor_threshold]
+            if not benchmark_players:
+                raise ValueError(
+                    f"--te-benchmark-scope ahead found no non-anchor portfolios with Value >= "
+                    f"{anchor_threshold:.2f} for anchor {anchor_name!r}."
+                )
+        print(
+            f"TE benchmark scope: {te_benchmark_scope if objective in {'max_te', 'vol_te'} else 'full'} "
+            f"({len(benchmark_players)} of {len(players_ex)} non-anchor portfolio(s) included)."
+        )
+        values_ex = {p: values[p] for p in benchmark_players}
+        universe_ex = make_universe_from_players(benchmark_players, ports)
         corr_u_wp_ex, vol_vec_wp_ex = ensure_corr_and_vol_coverage(universe_ex, corr, vols_wp)
         Sigma_ann_wp_ex = cov_from_corr_vol(corr_u_wp_ex, vol_vec_wp_ex)
         u_index_wp_ex = {t: i for i, t in enumerate(universe_ex)}
-        W_current_ex = {p: vectorize_port(ports[p], u_index_wp_ex) for p in players_ex}
-        W_mat_current_ex = np.stack([W_current_ex[p] for p in players_ex], axis=0)
+        W_current_ex = {p: vectorize_port(ports[p], u_index_wp_ex) for p in benchmark_players}
+        W_mat_current_ex = np.stack([W_current_ex[p] for p in benchmark_players], axis=0)
         win_probs = load_or_compute_win_probs_excl_anchor(
             winprob_path,
-            players_ex,
+            benchmark_players,
             values_ex,
             W_mat_current_ex,
             Sigma_ann_wp_ex,
@@ -1522,7 +1537,7 @@ def run_all(
             seed,
             overwrite_winprob_file,
         )
-        bench = build_weighted_benchmark(players_ex, ports, win_probs)
+        bench = build_weighted_benchmark(benchmark_players, ports, win_probs)
         bench = filter_portfolio_to_corr(bench, corr)
         for t in list(bench.keys()):
             if t in exclude_set:
@@ -1855,6 +1870,7 @@ if __name__ == "__main__":
     parser.add_argument("--factor-te-direction", choices=["max", "min"], default=None, help="Whether --objective factor_te maximises or minimises tracking error versus the selected factor.")
     parser.add_argument("--vol-te-vol-weight", type=float, default=None, help="Weight on absolute portfolio volatility for --objective vol_te.")
     parser.add_argument("--vol-te-te-weight", type=float, default=None, help="Weight on benchmark tracking error for --objective vol_te.")
+    parser.add_argument("--te-benchmark-scope", choices=["full", "ahead"], default=None, help="Benchmark scope for --objective max_te or vol_te. full uses all non-anchor portfolios; ahead uses portfolios with Value >= anchor Value.")
 
     parser.add_argument("--exclude", type=str, default=None, help="Comma-separated tickers to exclude from optimisation universe.")
     parser.add_argument("--forced", type=str, default=None, help='Forced holdings, e.g. "AAPL=25,NVDA=15,SHOP=10".')
@@ -1908,6 +1924,7 @@ if __name__ == "__main__":
     factor_te_direction = str(choose(args.factor_te_direction, config, "run", "factor_te_direction", "max")).strip().lower()
     vol_te_vol_weight = float(choose(args.vol_te_vol_weight, config, "vol_te_objective", "vol_weight", 0.5))
     vol_te_te_weight = float(choose(args.vol_te_te_weight, config, "vol_te_objective", "te_weight", 0.5))
+    te_benchmark_scope = str(choose(args.te_benchmark_scope, config, "run", "te_benchmark_scope", "full")).strip().lower()
 
     exclude = str(choose(args.exclude, config, "run", "exclude", ""))
     forced = str(choose(args.forced, config, "run", "forced", ""))
@@ -1929,6 +1946,8 @@ if __name__ == "__main__":
         raise ValueError("vol_te weights must be non-negative.")
     if objective == "vol_te" and vol_te_vol_weight <= 0 and vol_te_te_weight <= 0:
         raise ValueError("At least one vol_te weight must be positive.")
+    if te_benchmark_scope not in {"full", "ahead"}:
+        raise ValueError(f"te_benchmark_scope must be one of ['full', 'ahead']; got {te_benchmark_scope!r}.")
 
     print(
         f"Objective: {objective} | anchor={anchor} | corr={corr_file} | "
@@ -1964,5 +1983,6 @@ if __name__ == "__main__":
         factor_te_direction=factor_te_direction,
         vol_te_vol_weight=vol_te_vol_weight,
         vol_te_te_weight=vol_te_te_weight,
+        te_benchmark_scope=te_benchmark_scope,
         selected_value=selected_value,
     )
