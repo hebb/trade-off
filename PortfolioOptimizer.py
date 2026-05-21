@@ -136,10 +136,7 @@ def parse_pct(x) -> float:
     s = str(x).strip().replace(",", "")
     if s.endswith("%"):
         return float(s[:-1]) / 100.0
-    val = float(s)
-    if val > 1.5:
-        return val / 100.0
-    return val
+    return float(s)
 
 
 def parse_weights_string(s: str) -> Optional[List[float]]:
