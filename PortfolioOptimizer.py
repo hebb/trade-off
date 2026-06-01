@@ -29,6 +29,8 @@ Inputs and model choices:
   - The weighted benchmark is calculated only for te, max_te, and vol_te.
     For max_te and vol_te, --te-benchmark-scope ahead can limit the benchmark
     to non-anchor leaderboard entries with Value greater than or equal to the anchor.
+    --benchmark-exclude-players removes specific leaderboard names only from
+    that benchmark calculation.
   - Leaderboard factors are calculated only for factor_te, using a selected
     right singular vector of current non-anchor leaderboard portfolio weights.
     --factor-index chooses the 1-based SVD factor rank.  Absolute loadings are
@@ -178,6 +180,16 @@ def parse_forced_holdings(s: str, symbol_alias_map: Optional[Dict[str, str]] = N
     if sum(forced.values()) == 100 and len(forced) < 5:
         raise ValueError("Forced holdings sum to 100% but contain fewer than 5 stocks.")
     return forced
+
+
+def parse_player_exclude_list(value: object) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw_items = value
+    else:
+        raw_items = str(value).split(",")
+    return [str(item).strip() for item in raw_items if str(item).strip()]
 
 
 def portfolio_signature(port: Dict[str, float], round_to: int = 6) -> Tuple[Tuple[str, float], ...]:
@@ -1412,6 +1424,7 @@ def run_all(
     vol_te_vol_weight: float = 0.5,
     vol_te_te_weight: float = 0.5,
     te_benchmark_scope: str = "full",
+    benchmark_exclude_players: Optional[List[str]] = None,
     selected_value: Optional[float] = None,
 ) -> None:
     symbol_alias_map = load_symbol_alias_map(stocklist_csv)
@@ -1503,19 +1516,44 @@ def run_all(
             print(f"\nAnchor {anchor_name!r} was not found in the configured leaderboard; simulating the current leaderboard as-is.")
 
     elif objective in {"te", "max_te", "vol_te"}:
-        players_ex = [p for p in players if p != anchor_name]
-        benchmark_players = players_ex
+        all_non_anchor_players = [p for p in players if p != anchor_name]
+        requested_benchmark_exclude_set = set(benchmark_exclude_players or [])
+        unknown_excluded_players = sorted(p for p in requested_benchmark_exclude_set if p not in players)
+        if unknown_excluded_players:
+            raise ValueError(
+                f"--benchmark-exclude-players contains name(s) not found in the leaderboard: {unknown_excluded_players}"
+            )
+
+        benchmark_exclude_set = requested_benchmark_exclude_set.intersection(all_non_anchor_players)
+        players_ex = [p for p in all_non_anchor_players if p not in benchmark_exclude_set]
+        if not all_non_anchor_players:
+            raise ValueError("The leaderboard has no non-anchor players to build a benchmark from.")
+        if not players_ex:
+            raise ValueError("Benchmark player exclusion removed every non-anchor player.")
+
+        benchmark_scope_label = te_benchmark_scope if objective in {"max_te", "vol_te"} else "full"
+        all_scope_players = list(all_non_anchor_players)
         if objective in {"max_te", "vol_te"} and te_benchmark_scope == "ahead":
             anchor_threshold = float(values[anchor_name]) if anchor_name in values else selected_start_value()
-            benchmark_players = [p for p in players_ex if values[p] >= anchor_threshold]
-            if not benchmark_players:
+            all_scope_players = [p for p in all_non_anchor_players if values[p] >= anchor_threshold]
+            if not all_scope_players:
                 raise ValueError(
                     f"--te-benchmark-scope ahead found no non-anchor portfolios with Value >= "
                     f"{anchor_threshold:.2f} for anchor {anchor_name!r}."
                 )
+
+        benchmark_players = [p for p in all_scope_players if p not in benchmark_exclude_set]
+        if not benchmark_players:
+            raise ValueError(
+                f"Benchmark player exclusion removed every player in the {benchmark_scope_label!r} benchmark scope."
+            )
+        if benchmark_exclude_set:
+            excluded_found = [p for p in players if p in benchmark_exclude_set]
+            print(f"Benchmark excludes: {', '.join(excluded_found)}")
         print(
-            f"TE benchmark scope: {te_benchmark_scope if objective in {'max_te', 'vol_te'} else 'full'} "
-            f"({len(benchmark_players)} of {len(players_ex)} non-anchor portfolio(s) included)."
+            f"TE benchmark scope: {benchmark_scope_label} "
+            f"({len(benchmark_players)} of {len(all_scope_players)} eligible non-anchor portfolio(s) included; "
+            f"{len(players_ex)} of {len(all_non_anchor_players)} total non-anchor after benchmark exclusions)."
         )
         values_ex = {p: values[p] for p in benchmark_players}
         universe_ex = make_universe_from_players(benchmark_players, ports)
@@ -1868,6 +1906,7 @@ if __name__ == "__main__":
     parser.add_argument("--vol-te-vol-weight", type=float, default=None, help="Weight on absolute portfolio volatility for --objective vol_te.")
     parser.add_argument("--vol-te-te-weight", type=float, default=None, help="Weight on benchmark tracking error for --objective vol_te.")
     parser.add_argument("--te-benchmark-scope", choices=["full", "ahead"], default=None, help="Benchmark scope for --objective max_te or vol_te. full uses all non-anchor portfolios; ahead uses portfolios with Value >= anchor Value.")
+    parser.add_argument("--benchmark-exclude-players", type=str, default=None, help="Comma-separated leaderboard player names to exclude only from weighted benchmark calculation.")
 
     parser.add_argument("--exclude", type=str, default=None, help="Comma-separated tickers to exclude from optimisation universe.")
     parser.add_argument("--forced", type=str, default=None, help='Forced holdings, e.g. "AAPL=25,NVDA=15,SHOP=10".')
@@ -1922,6 +1961,9 @@ if __name__ == "__main__":
     vol_te_vol_weight = float(choose(args.vol_te_vol_weight, config, "vol_te_objective", "vol_weight", 0.5))
     vol_te_te_weight = float(choose(args.vol_te_te_weight, config, "vol_te_objective", "te_weight", 0.5))
     te_benchmark_scope = str(choose(args.te_benchmark_scope, config, "run", "te_benchmark_scope", "full")).strip().lower()
+    benchmark_exclude_players = parse_player_exclude_list(
+        choose(args.benchmark_exclude_players, config, "run", "benchmark_exclude_players", "")
+    )
 
     exclude = str(choose(args.exclude, config, "run", "exclude", ""))
     forced = str(choose(args.forced, config, "run", "forced", ""))
@@ -1981,5 +2023,6 @@ if __name__ == "__main__":
         vol_te_vol_weight=vol_te_vol_weight,
         vol_te_te_weight=vol_te_te_weight,
         te_benchmark_scope=te_benchmark_scope,
+        benchmark_exclude_players=benchmark_exclude_players,
         selected_value=selected_value,
     )

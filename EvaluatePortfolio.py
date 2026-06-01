@@ -172,6 +172,16 @@ def normalize_portfolio(port: Dict[str, float]) -> Dict[str, float]:
     return out
 
 
+def parse_player_exclude_list(value: object) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw_items = value
+    else:
+        raw_items = str(value).split(",")
+    return [str(item).strip() for item in raw_items if str(item).strip()]
+
+
 def load_candidate_portfolio(args: argparse.Namespace, symbol_alias_map: Dict[str, str]) -> Dict[str, float]:
     if args.portfolio and args.portfolio_file:
         raise ValueError("Pass either --portfolio or --portfolio-file, not both.")
@@ -243,6 +253,7 @@ def main() -> None:
     parser.add_argument("--sims", type=int, default=None, help="Number of Monte Carlo simulations.")
     parser.add_argument("--seed", type=int, default=None, help="RNG seed.")
     parser.add_argument("--benchmark-weighting", choices=["equal", "value"], default="equal", help="How to aggregate leaderboard portfolios into group benchmarks.")
+    parser.add_argument("--benchmark-exclude-players", type=str, default=None, help="Comma-separated leaderboard player names to exclude only from benchmark calculation.")
     parser.add_argument("--skip-win-probability", action="store_true", help="Skip Monte Carlo win-probability calculation.")
     parser.add_argument("--output-csv", type=str, default=None, help="Optional one-row metrics CSV to write.")
 
@@ -266,6 +277,9 @@ def main() -> None:
     corr_csv = str(choose_required(args.corr_file, config, "files", "corr_file"))
     volatility_csv = str(choose_required(args.vol_file, config, "files", "volatility_csv"))
     vol_source = str(choose(args.vol_source, config, "model", "sim_vol_source", "medium"))
+    benchmark_exclude_players = parse_player_exclude_list(
+        choose(args.benchmark_exclude_players, config, "run", "benchmark_exclude_players", "")
+    )
     sims: Optional[int] = None
     seed: Optional[int] = None
     days_remaining: Optional[int] = None
@@ -295,12 +309,25 @@ def main() -> None:
     else:
         raise ValueError(f"Anchor {anchor!r} is not in {leaderboard_csv}; pass --selected-value to add it synthetically.")
 
-    non_anchor_players = [p for p in players if p != anchor]
+    all_non_anchor_players = [p for p in players if p != anchor]
+    all_ahead_or_tied_players = [p for p in all_non_anchor_players if float(values[p]) >= anchor_value]
+    requested_benchmark_exclude_set = set(benchmark_exclude_players)
+    unknown_excluded_players = sorted(p for p in requested_benchmark_exclude_set if p not in players)
+    if unknown_excluded_players:
+        raise ValueError(f"--benchmark-exclude-players contains name(s) not found in the leaderboard: {unknown_excluded_players}")
+
+    benchmark_exclude_set = requested_benchmark_exclude_set.intersection(all_non_anchor_players)
+    non_anchor_players = [p for p in all_non_anchor_players if p not in benchmark_exclude_set]
     ahead_or_tied_players = [p for p in non_anchor_players if float(values[p]) >= anchor_value]
-    if not non_anchor_players:
+    if not all_non_anchor_players:
         raise ValueError("The leaderboard has no non-anchor players to compare against.")
+    if not non_anchor_players:
+        raise ValueError("Benchmark player exclusion removed every non-anchor player.")
     if not ahead_or_tied_players:
-        raise ValueError(f"No non-anchor players are tied with or ahead of {anchor} at value {anchor_value:.2f}.")
+        raise ValueError(
+            f"No benchmark-eligible non-anchor players are tied with or ahead of {anchor} "
+            f"at value {anchor_value:.2f}."
+        )
 
     proposed_noncash = [ticker for ticker in proposed_port if ticker != "CASH"]
     missing_corr = [ticker for ticker in proposed_noncash if ticker not in corr.index]
@@ -367,6 +394,9 @@ def main() -> None:
     else:
         print(f"Vol source: {vol_source} ({vol_col}) | days: {days_remaining} | sims: {n_used:,}")
     print(f"Benchmark weighting: {args.benchmark_weighting}")
+    if benchmark_exclude_set:
+        excluded_found = [p for p in players if p in benchmark_exclude_set]
+        print(f"Benchmark excludes: {', '.join(excluded_found)}")
     print("\nProposed portfolio:")
     for ticker, weight in sorted(proposed_port.items(), key=lambda item: item[1], reverse=True):
         print(f"  {ticker:8s} {format_pct(weight):>9s}")
@@ -374,15 +404,22 @@ def main() -> None:
         print(f"  NOTE:{legal_note}")
 
     print("\nMetrics:")
+    ahead_player_count = f"{len(ahead_or_tied_players)} players"
+    non_anchor_player_count = f"{len(non_anchor_players)} players"
+    if benchmark_exclude_set:
+        ahead_player_count = f"{len(ahead_or_tied_players)} of {len(all_ahead_or_tied_players)} players"
+        non_anchor_player_count = f"{len(non_anchor_players)} of {len(all_non_anchor_players)} players"
     print(f"  Annualized volatility:                         {format_pct(vol)}")
     print(
-        f"  TE vs tied/ahead non-anchor benchmark ({len(ahead_or_tied_players)} players): "
+        f"  TE vs tied/ahead non-anchor benchmark ({ahead_player_count}): "
         f"{format_pct(te_ahead)}"
     )
     print(
-        f"  TE vs full non-anchor leaderboard ({len(non_anchor_players)} players):      "
+        f"  TE vs full non-anchor benchmark ({non_anchor_player_count}):      "
         f"{format_pct(te_full)}"
     )
+    if benchmark_exclude_set:
+        print(f"  Benchmark-only exclusions:                    {len(benchmark_exclude_set)} player(s)")
     if args.skip_win_probability:
         print(f"  Probability {anchor} wins:                     skipped")
     else:
@@ -396,8 +433,11 @@ def main() -> None:
             "DaysRemaining": days_remaining,
             "Sims": n_used,
             "BenchmarkWeighting": args.benchmark_weighting,
+            "BenchmarkExcludedPlayers": ",".join(p for p in players if p in benchmark_exclude_set),
             "AheadOrTiedPlayers": len(ahead_or_tied_players),
+            "LeaderboardAheadOrTiedPlayers": len(all_ahead_or_tied_players),
             "NonAnchorPlayers": len(non_anchor_players),
+            "LeaderboardNonAnchorPlayers": len(all_non_anchor_players),
             "AnnualizedVolatility": vol,
             "TrackingErrorAheadOrTiedBenchmark": te_ahead,
             "TrackingErrorFullNonAnchorBenchmark": te_full,

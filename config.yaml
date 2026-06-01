@@ -38,5 +38,6 @@ leaderboard_update:
 run:
   objective: te
   anchor: AndrewHebb
+  benchmark_exclude_players: ""
   exclude: ""
   forced: ""
