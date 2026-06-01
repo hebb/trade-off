@@ -75,6 +75,7 @@ class IVResult:
     override_iv: Optional[float] = None
     override_used: bool = False
     override_status: str = ""
+    earnings_correlation_scale: float = 1.0
     earnings_window_start: str = ""
     earnings_window_end: str = ""
     earnings_event_start: str = ""
@@ -257,6 +258,7 @@ def clean_df(path):
     numeric_cols = [
         "Implied Volatility",
         "Contest Implied Volatility",
+        "Earnings Correlation Scale",
     ]
 
     text_cols = [
@@ -1249,6 +1251,7 @@ def apply_base_earnings_override(result, hist, override_kind):
         return result
 
     result.override_iv = base_iv
+    result.earnings_correlation_scale = 1.0
 
     if base_source == "forward":
         result.source = append_override_source(result.source, "forward_earnings_override")
@@ -1284,6 +1287,8 @@ def apply_open_to_open_earnings_override(result, hist, first_expiry_trading_days
 
     if event_var > 0 and math.isfinite(event_var):
         result.override_iv = math.sqrt(event_var)
+        if result.override_iv > 0 and math.isfinite(result.override_iv):
+            result.earnings_correlation_scale = base_iv / result.override_iv
         result.source = append_override_source(result.source, "open_to_open_earnings_override")
         result.override_status = (
             "open-to-open earnings override calculated isolated one-trading-day IV "
@@ -1292,6 +1297,7 @@ def apply_open_to_open_earnings_override(result, hist, first_expiry_trading_days
         return result
 
     result.override_iv = base_iv
+    result.earnings_correlation_scale = 1.0
     result.source = append_override_source(
         result.source,
         f"open_to_open_{base_source}_fallback_earnings_override",
@@ -1307,6 +1313,7 @@ def apply_earnings_override(result, hist, override_kind, first_expiry_trading_da
     result.override_iv = None
     result.override_used = False
     result.override_status = "no earnings override"
+    result.earnings_correlation_scale = 1.0
 
     if override_kind == EARNINGS_NONE:
         return result
@@ -1480,6 +1487,7 @@ def reorder_columns(df):
         "Name",
         "Symbol",
         "Implied Volatility",
+        "Earnings Correlation Scale",
         "Expiry Date",
         "Contest Implied Volatility",
         "Contest Expiry Date",
@@ -1518,6 +1526,7 @@ def main():
         if pd.isna(raw_symbol) or str(raw_symbol).strip() == "":
             df.at[i, "Implied Volatility"] = np.nan
             df.at[i, "Contest Implied Volatility"] = np.nan
+            df.at[i, "Earnings Correlation Scale"] = np.nan
             df.at[i, "Forward Implied Volatility"] = np.nan
             df.at[i, "Earnings Override Volatility"] = np.nan
             df.at[i, "Expiry Date"] = ""
@@ -1550,6 +1559,11 @@ def main():
         output_iv = r.override_iv if r.override_iv is not None else r.iv
 
         df.at[i, "Implied Volatility"] = output_iv if output_iv is not None else np.nan
+        df.at[i, "Earnings Correlation Scale"] = (
+            r.earnings_correlation_scale
+            if r.earnings_correlation_scale > 0 and math.isfinite(r.earnings_correlation_scale)
+            else 1.0
+        )
         df.at[i, "Expiry Date"] = r.expiry
         df.at[i, "Contest Implied Volatility"] = (
             r.contest_iv if r.contest_iv is not None else np.nan
@@ -1567,6 +1581,7 @@ def main():
             f"contest_IV={r.contest_iv} contest_expiry={r.contest_expiry} "
             f"forward_IV={r.forward_iv} forward_expiry={r.forward_expiry} "
             f"override_IV={r.override_iv} override_used={r.override_used} "
+            f"corr_scale={r.earnings_correlation_scale} "
             f"overlap={r.earnings_window_overlap} "
             f"source={r.source} status={r.final_status}"
         )

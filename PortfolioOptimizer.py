@@ -301,6 +301,83 @@ def load_vols(
     return out
 
 
+def load_earnings_correlation_scales(
+    path: str,
+    symbol_alias_map: Optional[Dict[str, str]] = None,
+) -> Dict[str, float]:
+    vols = pd.read_csv(path)
+    ticker_col = None
+    for candidate in ["Ticker", "Symbol", "Underlying"]:
+        if candidate in vols.columns:
+            ticker_col = candidate
+            break
+
+    scale_col = "Earnings Correlation Scale"
+    if ticker_col is None or scale_col not in vols.columns:
+        return {}
+
+    out: Dict[str, float] = {}
+    for _, row in vols.iterrows():
+        raw = row.get(ticker_col, "")
+        scale_raw = row.get(scale_col, "")
+        if pd.isna(raw) or not str(raw).strip() or pd.isna(scale_raw) or not str(scale_raw).strip():
+            continue
+        try:
+            scale = parse_pct(scale_raw)
+        except Exception:
+            continue
+        if not math.isfinite(scale) or scale <= 0 or abs(scale - 1.0) <= 1e-12:
+            continue
+
+        t_norm = norm_ticker(raw)
+        t_canon = canonical_ticker(raw, symbol_alias_map)
+        out[t_norm] = scale
+        out[t_canon] = scale
+    return out
+
+
+def apply_earnings_correlation_scales(
+    corr: pd.DataFrame,
+    scales: Dict[str, float],
+) -> pd.DataFrame:
+    if not scales:
+        return corr
+
+    active = {
+        ticker: float(scale)
+        for ticker, scale in scales.items()
+        if ticker in corr.index and math.isfinite(float(scale)) and float(scale) > 0 and abs(float(scale) - 1.0) > 1e-12
+    }
+    if not active:
+        return corr
+
+    factors = np.ones(len(corr.index), dtype=float)
+    index = {ticker: i for i, ticker in enumerate(corr.index)}
+    for ticker, scale in active.items():
+        factors[index[ticker]] = scale
+
+    arr = corr.to_numpy(dtype=float, copy=True) * np.outer(factors, factors)
+    arr = (arr + arr.T) / 2.0
+    arr = np.clip(arr, -1.0, 1.0)
+    np.fill_diagonal(arr, 1.0)
+
+    arr = repair_to_psd(arr)
+    diag = np.sqrt(np.clip(np.diag(arr), 1e-12, None))
+    arr = arr / np.outer(diag, diag)
+    arr = np.clip(arr, -1.0, 1.0)
+    np.fill_diagonal(arr, 1.0)
+    return pd.DataFrame(arr, index=corr.index, columns=corr.columns)
+
+
+def format_earnings_correlation_scale_summary(scales: Dict[str, float], corr: pd.DataFrame) -> str:
+    active = [
+        (ticker, scales[ticker])
+        for ticker in corr.index
+        if ticker in scales and math.isfinite(float(scales[ticker])) and abs(float(scales[ticker]) - 1.0) > 1e-12
+    ]
+    return ", ".join(f"{ticker}={scale:.4g}" for ticker, scale in active)
+
+
 def load_leaderboard(path: str) -> pd.DataFrame:
     lb = pd.read_csv(path)
     expected = {"Name", "Value", "Holdings", "Weights"}
@@ -1433,6 +1510,12 @@ def run_all(
         print(f"Loaded {n_aliases} alternative-symbol mapping(s) from {stocklist_csv}")
 
     corr = load_corr_matrix(corr_csv)
+    earnings_corr_scales = load_earnings_correlation_scales(volatility_csv, symbol_alias_map=symbol_alias_map)
+    if earnings_corr_scales:
+        scale_summary = format_earnings_correlation_scale_summary(earnings_corr_scales, corr)
+        corr = apply_earnings_correlation_scales(corr, earnings_corr_scales)
+        if scale_summary:
+            print(f"Applied earnings correlation scales: {scale_summary}")
     vol_short = load_vols(
         volatility_csv,
         symbol_alias_map=symbol_alias_map,

@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from PortfolioOptimizer import (
+    apply_earnings_correlation_scales,
     build_player_portfolios,
     canonical_ticker,
     choose,
@@ -36,11 +37,13 @@ from PortfolioOptimizer import (
     is_legal_portfolio,
     load_config_file,
     load_corr_matrix,
+    load_earnings_correlation_scales,
     load_leaderboard,
     load_symbol_alias_map,
     load_vols,
     moe95,
     simulate_finish_probs,
+    format_earnings_correlation_scale_summary,
     tracking_error_portfolios,
     vectorize_port,
 )
@@ -292,6 +295,12 @@ def main() -> None:
     proposed_port = load_candidate_portfolio(args, symbol_alias_map)
 
     corr = load_corr_matrix(corr_csv)
+    earnings_corr_scales = load_earnings_correlation_scales(volatility_csv, symbol_alias_map=symbol_alias_map)
+    if earnings_corr_scales:
+        scale_summary = format_earnings_correlation_scale_summary(earnings_corr_scales, corr)
+        corr = apply_earnings_correlation_scales(corr, earnings_corr_scales)
+        if scale_summary:
+            print(f"Applied earnings correlation scales: {scale_summary}")
     vol_col = "Implied Volatility" if vol_source == "short" else "Contest Implied Volatility"
     vols = load_vols(volatility_csv, symbol_alias_map=symbol_alias_map, volatility_col=vol_col)
 
