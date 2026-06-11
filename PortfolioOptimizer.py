@@ -29,8 +29,8 @@ Inputs and model choices:
   - The weighted benchmark is calculated only for te, max_te, and vol_te.
     For max_te and vol_te, --te-benchmark-scope ahead can limit the benchmark
     to non-anchor leaderboard entries with Value greater than or equal to the anchor.
-    --benchmark-exclude-players removes specific leaderboard names only from
-    that benchmark calculation.
+    --benchmark-exclude-players removes specific leaderboard names from
+    all leaderboard-based calculations in the script.
   - Leaderboard factors are calculated only for factor_te, using a selected
     right singular vector of current non-anchor leaderboard portfolio weights.
     --factor-index chooses the 1-based SVD factor rank.  Absolute loadings are
@@ -562,7 +562,7 @@ def vectorize_port(port: Dict[str, float], universe_index: Dict[str, int]) -> np
 
 
 def dict_from_weight_vector(w: np.ndarray, universe: List[str]) -> Dict[str, float]:
-    out = {t: float(w[i]) for i, t in enumerate(universe) if float(w[i]) > 1e-8}
+    out = {t: float(w[i]) for i, t in enumerate(universe) if float(w[i]) > 1e-12}
     s = sum(out.values())
     if s > 0:
         for k in list(out.keys()):
@@ -826,6 +826,7 @@ def cross_entropy_optimise(
     maximise: bool,
     label: str,
     polish_steps: int = 800,
+    candidate_callback: Optional[Callable[[Dict[str, float], float, float], None]] = None,
 ) -> Dict[str, float]:
     probs = np.array([max((initial_bias or {}).get(t, 0.0), 0.0) for t in tickers], dtype=float)
     if probs.sum() <= 0:
@@ -842,6 +843,10 @@ def cross_entropy_optimise(
     def to_vec(port: Dict[str, float]) -> np.ndarray:
         return vectorize_port(port, u_index)
 
+    def record(port: Dict[str, float], score: float, aux: float) -> None:
+        if candidate_callback is not None:
+            candidate_callback(port, score, aux)
+
     for r in range(n_rounds):
         scores = np.empty(samples_per_round, dtype=float)
         auxs = np.empty(samples_per_round, dtype=float)
@@ -852,6 +857,7 @@ def cross_entropy_optimise(
             scores[i] = score
             auxs[i] = aux
             ports.append(port)
+            record(port, score, aux)
             improved = score > best_score if maximise else score < best_score
             if best_port is None or improved:
                 best_port = port
@@ -878,7 +884,7 @@ def cross_entropy_optimise(
     if best_port is None:
         raise RuntimeError("Optimiser failed to find a feasible portfolio.")
 
-    # Polish by 1% transfers among held names, cash, and high-probability outsiders.
+    # Polish with 1% transfers plus legal moves that can change the holding set.
     universe = list(u_index.keys())
     w = to_vec(best_port)
     forced_idx = {u_index[t] for t in forced if t in u_index}
@@ -890,13 +896,39 @@ def cross_entropy_optimise(
     noncash_idx = [u_index[t] for t in tickers if t in u_index]
 
     cur_score, cur_aux = objective_fn(w)
-    candidate_receivers = sorted(tickers, key=lambda t: probs[tickers.index(t)], reverse=True)[:max(40, constraints.min_stocks)]
-    candidate_receiver_idx = [u_index[t] for t in candidate_receivers if t in u_index]
-    if cash_i is not None:
-        candidate_receiver_idx.append(cash_i)
+    record(best_port, cur_score, cur_aux)
+    if cash_i is not None and w[cash_i] > 1e-12:
+        candidate_receiver_idx = [i for i in range(len(universe)) if i != cash_i]
+    else:
+        candidate_receivers = sorted(tickers, key=lambda t: probs[tickers.index(t)], reverse=True)[:max(40, constraints.min_stocks)]
+        candidate_receiver_idx = [u_index[t] for t in candidate_receivers if t in u_index]
+        if cash_i is not None:
+            candidate_receiver_idx.append(cash_i)
 
     def count_noncash(wv: np.ndarray) -> int:
         return int(np.sum(wv[noncash_idx] > 1e-12))
+
+    structured_outsiders = [
+        u_index[t]
+        for t in sorted(tickers, key=lambda t: probs[tickers.index(t)], reverse=True)[:max(60, constraints.min_stocks)]
+        if t in u_index
+    ]
+
+    def accept_if_improved(w2: np.ndarray) -> bool:
+        nonlocal w, cur_score, cur_aux
+        w2 = np.clip(w2, 0.0, None)
+        p2 = dict_from_weight_vector(w2, universe)
+        if not is_legal_portfolio(p2, constraints, forced):
+            return False
+        score2, aux2 = objective_fn(w2)
+        record(p2, score2, aux2)
+        improved = score2 > cur_score + 1e-12 if maximise else score2 < cur_score - 1e-12
+        if not improved:
+            return False
+        w = w2
+        cur_score = score2
+        cur_aux = aux2
+        return True
 
     for _ in range(polish_steps):
         improved_any = False
@@ -925,23 +957,62 @@ def cross_entropy_optimise(
                 w2 = w.copy()
                 w2[donor] -= step
                 w2[recv] += step
-                w2 = np.clip(w2, 0.0, None)
-                s = w2.sum()
-                if abs(s - 1.0) > 1e-8 and s > 0:
-                    w2 /= s
-                p2 = dict_from_weight_vector(w2, universe)
-                if not is_legal_portfolio(p2, constraints, forced):
-                    continue
-                score2, aux2 = objective_fn(w2)
-                improved = score2 > cur_score + 1e-12 if maximise else score2 < cur_score - 1e-12
-                if improved:
-                    w = w2
-                    cur_score = score2
-                    cur_aux = aux2
+                if accept_if_improved(w2):
                     improved_any = True
                     break
             if improved_any:
                 break
+        if not improved_any:
+            held = [i for i in noncash_idx if w[i] > 1e-12]
+            outsiders = [i for i in structured_outsiders if w[i] <= 1e-12 and i not in forced_idx]
+
+            # Replace an entire holding, preserving its legal weight.
+            for donor in [i for i in held if i not in forced_idx]:
+                for recv in outsiders:
+                    w2 = w.copy()
+                    w2[recv] = w2[donor]
+                    w2[donor] = 0.0
+                    if accept_if_improved(w2):
+                        improved_any = True
+                        break
+                if improved_any:
+                    break
+        if not improved_any:
+            held = [i for i in noncash_idx if w[i] > 1e-12]
+            outsiders = [i for i in structured_outsiders if w[i] <= 1e-12 and i not in forced_idx]
+
+            # Split one minimum-size holding from a held name or cash.
+            split_donors = [i for i in held if i not in forced_idx and w[i] >= 2 * minw - 1e-12]
+            if cash_i is not None and w[cash_i] >= minw - 1e-12:
+                split_donors.append(cash_i)
+            for donor in split_donors:
+                for recv in outsiders:
+                    w2 = w.copy()
+                    w2[donor] -= minw
+                    w2[recv] = minw
+                    if accept_if_improved(w2):
+                        improved_any = True
+                        break
+                if improved_any:
+                    break
+        if not improved_any:
+            held = [i for i in noncash_idx if w[i] > 1e-12]
+
+            # Merge a minimum-size holding into another held name.
+            merge_donors = [i for i in held if i not in forced_idx and abs(w[i] - minw) <= 1e-8]
+            merge_receivers = [i for i in held if i not in forced_idx and w[i] <= maxw - minw + 1e-12]
+            for donor in merge_donors:
+                for recv in merge_receivers:
+                    if donor == recv:
+                        continue
+                    w2 = w.copy()
+                    w2[recv] += w2[donor]
+                    w2[donor] = 0.0
+                    if accept_if_improved(w2):
+                        improved_any = True
+                        break
+                if improved_any:
+                    break
         if not improved_any:
             break
 
@@ -961,6 +1032,7 @@ class MonteCarloObjectiveContext:
     asset_gross_T: np.ndarray
     max_logV_other: np.ndarray
     logV0_a: float
+    smooth_bandwidth: float = 0.01
 
 
 def make_mc_objective_context(players: List[str], values: Dict[str, float], W_full: Dict[str, np.ndarray], Sigma_ann: np.ndarray, days_remaining: int, inner_sims: int, seed: int, anchor: str) -> MonteCarloObjectiveContext:
@@ -989,15 +1061,146 @@ def make_mc_objective_context(players: List[str], values: Dict[str, float], W_fu
     gross_other = np.maximum(gross_other, 1e-300)
     logV_other = logV0_other[None, :] + np.log(gross_other)
     max_logV_other = np.max(logV_other, axis=1)
-    return MonteCarloObjectiveContext(asset_gross_T=asset_gross_T, max_logV_other=max_logV_other, logV0_a=logV0_a)
+    robust_scale = float((np.quantile(max_logV_other, 0.90) - np.quantile(max_logV_other, 0.10)) / 2.563)
+    if not math.isfinite(robust_scale) or robust_scale <= 1e-8:
+        robust_scale = float(np.std(max_logV_other))
+    positive_gap = max(float(np.median(max_logV_other) - logV0_a), 0.0)
+    smooth_bandwidth = max(1e-4, 0.25 * robust_scale, positive_gap / 6.0)
+    return MonteCarloObjectiveContext(
+        asset_gross_T=asset_gross_T,
+        max_logV_other=max_logV_other,
+        logV0_a=logV0_a,
+        smooth_bandwidth=smooth_bandwidth,
+    )
+
+
+def mc_terminal_margin(w_anchor: np.ndarray, ctx: MonteCarloObjectiveContext) -> np.ndarray:
+    held = np.flatnonzero(w_anchor > 1e-12)
+    if held.size == 0:
+        gross_anchor = np.zeros(ctx.asset_gross_T.shape[0], dtype=float)
+    else:
+        gross_anchor = ctx.asset_gross_T[:, held] @ w_anchor[held]
+    gross_anchor = np.maximum(gross_anchor, 1e-300)
+    logV_anchor = ctx.logV0_a + np.log(gross_anchor)
+    return logV_anchor - ctx.max_logV_other
 
 
 def mc_win_prob_first(w_anchor: np.ndarray, ctx: MonteCarloObjectiveContext) -> Tuple[float, float]:
-    gross_anchor = ctx.asset_gross_T @ w_anchor
-    gross_anchor = np.maximum(gross_anchor, 1e-300)
-    logV_anchor = ctx.logV0_a + np.log(gross_anchor)
-    p_hat = float(np.mean(logV_anchor > ctx.max_logV_other))
-    return float(math.log(p_hat + 1e-12)), p_hat
+    p_hat = float(np.mean(mc_terminal_margin(w_anchor, ctx) > 0.0))
+    return p_hat, p_hat
+
+
+def mc_smoothed_win_score(w_anchor: np.ndarray, ctx: MonteCarloObjectiveContext) -> Tuple[float, float]:
+    margin = mc_terminal_margin(w_anchor, ctx)
+    scaled = np.clip(margin / max(ctx.smooth_bandwidth, 1e-12), -60.0, 60.0)
+    smooth_score = float(np.mean(1.0 / (1.0 + np.exp(-scaled))))
+    p_hat = float(np.mean(margin > 0.0))
+    return smooth_score, p_hat
+
+
+@dataclass
+class WinCandidate:
+    portfolio: Dict[str, float]
+    smooth_score: float
+    raw_win_prob: float
+    source: str
+
+
+class WinCandidateArchive:
+    def __init__(self, max_per_metric: int = 12):
+        self.max_per_metric = max_per_metric
+        self._candidates: Dict[Tuple[Tuple[str, float], ...], WinCandidate] = {}
+
+    def add(self, portfolio: Dict[str, float], smooth_score: float, raw_win_prob: float, source: str) -> None:
+        sig = portfolio_signature(portfolio)
+        existing = self._candidates.get(sig)
+        candidate = WinCandidate(dict(portfolio), float(smooth_score), float(raw_win_prob), source)
+        if existing is None or (candidate.raw_win_prob, candidate.smooth_score) > (existing.raw_win_prob, existing.smooth_score):
+            self._candidates[sig] = candidate
+        if len(self._candidates) > 4 * self.max_per_metric:
+            self._trim()
+
+    def _trim(self) -> None:
+        values = list(self._candidates.values())
+        by_smooth = sorted(values, key=lambda c: (c.smooth_score, c.raw_win_prob), reverse=True)[:self.max_per_metric]
+        by_raw = sorted(values, key=lambda c: (c.raw_win_prob, c.smooth_score), reverse=True)[:self.max_per_metric]
+        self._candidates = {portfolio_signature(c.portfolio): c for c in by_smooth + by_raw}
+
+    def candidates(self) -> List[WinCandidate]:
+        self._trim()
+        return sorted(
+            self._candidates.values(),
+            key=lambda c: (c.raw_win_prob, c.smooth_score, portfolio_signature(c.portfolio)),
+            reverse=True,
+        )
+
+
+def make_win_seed_portfolios(
+    tickers: List[str],
+    biases: List[Dict[str, float]],
+    constraints: ContestConstraints,
+    forced: Dict[str, int],
+    seed: int,
+) -> List[Dict[str, float]]:
+    out: List[Dict[str, float]] = []
+    seen: Set[Tuple[Tuple[str, float], ...]] = set()
+    for bias_i, bias in enumerate(biases):
+        probs = np.array([max(float(bias.get(t, 0.0)), 0.0) for t in tickers], dtype=float)
+        if probs.sum() <= 0:
+            probs = np.ones(len(tickers), dtype=float)
+        probs = np.power(probs / probs.max(), 4.0) + 1e-12
+        probs /= probs.sum()
+        rng = np.random.default_rng(seed + 50_000 + bias_i)
+        for _ in range(4):
+            port = sample_legal_portfolio(rng, tickers, probs, constraints, forced)
+            sig = portfolio_signature(port)
+            if sig not in seen:
+                out.append(port)
+                seen.add(sig)
+    return out
+
+
+def validate_win_candidates(
+    candidates: List[Dict[str, float]],
+    players: List[str],
+    values: Dict[str, float],
+    W_full: Dict[str, np.ndarray],
+    Sigma_ann: np.ndarray,
+    days_remaining: int,
+    n_sims: int,
+    seed: int,
+    anchor: str,
+    u_index: Dict[str, int],
+) -> np.ndarray:
+    if not candidates:
+        raise ValueError("No win candidates supplied for validation.")
+    players_other = [p for p in players if p != anchor]
+    if not players_other:
+        raise ValueError("Win validation requires at least one non-anchor opponent.")
+
+    Sigma_day = Sigma_ann / 252.0
+    mu_day = -0.5 * np.diag(Sigma_day)
+    mean_T = int(days_remaining) * mu_day
+    cov_T = repair_to_psd(int(days_remaining) * Sigma_day)
+    L = np.linalg.cholesky(cov_T + 1e-16 * np.eye(cov_T.shape[0]))
+    W_other = np.stack([W_full[p] for p in players_other], axis=0)
+    logV0_other = np.array([math.log(values[p]) for p in players_other], dtype=float)
+    W_candidates = np.stack([vectorize_port(port, u_index) for port in candidates], axis=0)
+    logV0_a = float(math.log(values[anchor]))
+
+    rng = np.random.default_rng(seed)
+    wins = np.zeros(len(candidates), dtype=np.int64)
+    batch = 20_000
+    for start in range(0, n_sims, batch):
+        b = min(batch, n_sims - start)
+        asset_log_T = mean_T + (rng.standard_normal(size=(b, cov_T.shape[0])) @ L.T)
+        asset_gross_T = np.exp(asset_log_T)
+        gross_other = np.maximum(asset_gross_T @ W_other.T, 1e-300)
+        max_logV_other = np.max(logV0_other[None, :] + np.log(gross_other), axis=1)
+        gross_candidates = np.maximum(asset_gross_T @ W_candidates.T, 1e-300)
+        logV_candidates = logV0_a + np.log(gross_candidates)
+        wins += np.sum(logV_candidates > max_logV_other[:, None], axis=0)
+    return wins.astype(float) / float(n_sims)
 
 
 # -----------------------------
@@ -1503,6 +1706,8 @@ def run_all(
     te_benchmark_scope: str = "full",
     benchmark_exclude_players: Optional[List[str]] = None,
     selected_value: Optional[float] = None,
+    win_restarts: int = 4,
+    win_validation_sims: int = 100_000,
 ) -> None:
     symbol_alias_map = load_symbol_alias_map(stocklist_csv)
     if symbol_alias_map:
@@ -1557,6 +1762,21 @@ def run_all(
     players, values, ports = build_player_portfolios(lb, symbol_alias_map=symbol_alias_map)
     ports = {p: filter_portfolio_to_corr(ports[p], corr) for p in players}
 
+    benchmark_exclude_players = benchmark_exclude_players or []
+    requested_excluded_players = set(benchmark_exclude_players)
+    unknown_excluded_players = sorted(p for p in requested_excluded_players if p not in players)
+    if unknown_excluded_players:
+        raise ValueError(
+            f"--benchmark-exclude-players contains name(s) not found in the leaderboard: {unknown_excluded_players}"
+        )
+    if anchor_name in requested_excluded_players:
+        raise ValueError("--benchmark-exclude-players may not contain the anchor player.")
+    if requested_excluded_players:
+        players = [p for p in players if p not in requested_excluded_players]
+        values = {p: v for p, v in values.items() if p not in requested_excluded_players}
+        ports = {p: port for p, port in ports.items() if p not in requested_excluded_players}
+        print(f"Excluded leaderboard players: {', '.join(sorted(requested_excluded_players))}")
+
     def selected_start_value() -> float:
         if selected_value is not None:
             return float(selected_value)
@@ -1567,6 +1787,7 @@ def run_all(
         raise ValueError("The configured leaderboard contains no usable players, so a selected starting value is required.")
 
     anchor_port: Optional[Dict[str, float]] = None
+    win_validation_prob: Optional[float] = None
     run_final_sim = True
 
     if objective == "vol":
@@ -1600,19 +1821,8 @@ def run_all(
 
     elif objective in {"te", "max_te", "vol_te"}:
         all_non_anchor_players = [p for p in players if p != anchor_name]
-        requested_benchmark_exclude_set = set(benchmark_exclude_players or [])
-        unknown_excluded_players = sorted(p for p in requested_benchmark_exclude_set if p not in players)
-        if unknown_excluded_players:
-            raise ValueError(
-                f"--benchmark-exclude-players contains name(s) not found in the leaderboard: {unknown_excluded_players}"
-            )
-
-        benchmark_exclude_set = requested_benchmark_exclude_set.intersection(all_non_anchor_players)
-        players_ex = [p for p in all_non_anchor_players if p not in benchmark_exclude_set]
         if not all_non_anchor_players:
             raise ValueError("The leaderboard has no non-anchor players to build a benchmark from.")
-        if not players_ex:
-            raise ValueError("Benchmark player exclusion removed every non-anchor player.")
 
         benchmark_scope_label = te_benchmark_scope if objective in {"max_te", "vol_te"} else "full"
         all_scope_players = list(all_non_anchor_players)
@@ -1625,18 +1835,15 @@ def run_all(
                     f"{anchor_threshold:.2f} for anchor {anchor_name!r}."
                 )
 
-        benchmark_players = [p for p in all_scope_players if p not in benchmark_exclude_set]
+        benchmark_players = list(all_scope_players)
         if not benchmark_players:
             raise ValueError(
                 f"Benchmark player exclusion removed every player in the {benchmark_scope_label!r} benchmark scope."
             )
-        if benchmark_exclude_set:
-            excluded_found = [p for p in players if p in benchmark_exclude_set]
-            print(f"Benchmark excludes: {', '.join(excluded_found)}")
         print(
             f"TE benchmark scope: {benchmark_scope_label} "
             f"({len(benchmark_players)} of {len(all_scope_players)} eligible non-anchor portfolio(s) included; "
-            f"{len(players_ex)} of {len(all_non_anchor_players)} total non-anchor after benchmark exclusions)."
+            f"{len(all_non_anchor_players)} total non-anchor after exclusions)."
         )
         values_ex = {p: values[p] for p in benchmark_players}
         universe_ex = make_universe_from_players(benchmark_players, ports)
@@ -1817,21 +2024,112 @@ def run_all(
         W_full_current = {p: vectorize_port(ports_for_obj[p], u_index) for p in players_for_obj}
         ctx_mc = make_mc_objective_context(players_for_obj, values_for_obj, W_full_current, Sigma_ann_opt, days_remaining, inner_sims, seed, anchor_name)
 
+        search_tickers = [t for t in tickers_for_anchor if t != "CASH"]
         vol_bias = {t: opt_vols_for_universe.get(t, 0.0) for t in tickers_for_anchor}
-        print(f"\nOptimising for win probability using {opt_vol_source.upper()}-TERM vols (inner MC objective, S={inner_sims}).")
-        anchor_port = cross_entropy_optimise(
-            rng=np.random.default_rng(seed),
-            tickers=[t for t in tickers_for_anchor if t != "CASH"],
-            constraints=constraints,
-            forced=forced,
-            objective_fn=lambda w: mc_win_prob_first(w, ctx_mc),
-            u_index=u_index,
-            initial_bias=vol_bias,
-            n_rounds=rounds,
-            samples_per_round=samples,
-            maximise=True,
-            label="P1st",
-            polish_steps=800,
+        tail_bias: Dict[str, float] = {}
+        for t in search_tickers:
+            w_single = np.zeros(len(universe0), dtype=float)
+            w_single[u_index[t]] = 1.0
+            tail_bias[t] = mc_smoothed_win_score(w_single, ctx_mc)[0]
+        tail_floor = min(tail_bias.values())
+        tail_bias = {t: max(score - tail_floor, 0.0) + 1e-12 for t, score in tail_bias.items()}
+        blended_bias = {
+            t: math.sqrt(max(vol_bias.get(t, 0.0), 0.0) * max(tail_bias.get(t, 0.0), 0.0))
+            for t in search_tickers
+        }
+
+        archive = WinCandidateArchive(max_per_metric=12)
+        mandatory_validation: Dict[Tuple[Tuple[str, float], ...], WinCandidate] = {}
+
+        def archive_port(port: Dict[str, float], source: str, mandatory: bool = False) -> None:
+            smooth_score, raw_prob = mc_smoothed_win_score(vectorize_port(port, u_index), ctx_mc)
+            archive.add(port, smooth_score, raw_prob, source)
+            if mandatory:
+                mandatory_validation[portfolio_signature(port)] = WinCandidate(
+                    dict(port), smooth_score, raw_prob, source
+                )
+
+        if anchor_name in ports_for_obj:
+            current_port = ports_for_obj[anchor_name]
+            current_names = {t for t in current_port if t != "CASH" and current_port[t] > 1e-12}
+            if current_names.issubset(set(search_tickers)) and is_legal_portfolio(current_port, constraints, forced):
+                archive_port(current_port, "current", mandatory=True)
+
+        seed_biases = [vol_bias, tail_bias, blended_bias]
+        for seed_port in make_win_seed_portfolios(search_tickers, seed_biases, constraints, forced, seed):
+            archive_port(seed_port, "high-upside seed", mandatory=True)
+
+        restart_biases: List[Tuple[str, Optional[Dict[str, float]]]] = [
+            ("uniform", None),
+            ("volatility", vol_bias),
+            ("tail", tail_bias),
+            ("blended", blended_bias),
+        ]
+        print(
+            f"\nOptimising for win probability using {opt_vol_source.upper()}-TERM vols "
+            f"(tail-aware inner MC, S={inner_sims}, restarts={win_restarts})."
+        )
+        for restart_i in range(win_restarts):
+            restart_name, initial_bias = restart_biases[restart_i % len(restart_biases)]
+            source = f"restart {restart_i + 1} ({restart_name})"
+            print(f"\nWin search {restart_i + 1}/{win_restarts}: {restart_name} bias")
+
+            def record_candidate(port: Dict[str, float], score: float, aux: float, source: str = source) -> None:
+                archive.add(port, score, aux, source)
+
+            restart_port = cross_entropy_optimise(
+                rng=np.random.default_rng(seed + 10_000 * restart_i),
+                tickers=search_tickers,
+                constraints=constraints,
+                forced=forced,
+                objective_fn=lambda w: mc_smoothed_win_score(w, ctx_mc),
+                u_index=u_index,
+                initial_bias=initial_bias,
+                n_rounds=rounds,
+                samples_per_round=samples,
+                maximise=True,
+                label="training P1st",
+                polish_steps=300,
+                candidate_callback=record_candidate,
+            )
+            archive_port(restart_port, source)
+
+        archived_by_sig = {portfolio_signature(candidate.portfolio): candidate for candidate in archive.candidates()}
+        archived_by_sig.update(mandatory_validation)
+        archived = list(archived_by_sig.values())
+        validation_ports = [candidate.portfolio for candidate in archived]
+        validation_probs = validate_win_candidates(
+            validation_ports,
+            players_for_obj,
+            values_for_obj,
+            W_full_current,
+            Sigma_ann_opt,
+            days_remaining,
+            win_validation_sims,
+            seed + 1_000_003,
+            anchor_name,
+            u_index,
+        )
+        best_i = max(
+            range(len(archived)),
+            key=lambda i: (
+                float(validation_probs[i]),
+                archived[i].raw_win_prob,
+                archived[i].smooth_score,
+                portfolio_signature(archived[i].portfolio),
+            ),
+        )
+        anchor_port = archived[best_i].portfolio
+        win_validation_prob = float(validation_probs[best_i])
+        print(
+            f"\nSelected from {len(archived)} archived candidate(s) by independent "
+            f"{opt_vol_source.upper()}-TERM validation ({win_validation_sims:,} simulations)."
+        )
+        print(f"Optimisation-model validation P1st: {win_validation_prob * 100:.6f}%")
+        print(
+            f"Selected candidate source: {archived[best_i].source} | "
+            f"training P1st={archived[best_i].raw_win_prob * 100:.6f}% | "
+            f"smoothed score={archived[best_i].smooth_score:.6f}"
         )
         print(f"\nWin-probability-optimised portfolio for {anchor_name} (contest-legal, cash capped):")
         for t, wt in sorted(anchor_port.items(), key=lambda x: x[1], reverse=True):
@@ -1879,6 +2177,15 @@ def run_all(
             p_hat = float(pa[k])
             moe = moe95(p_hat, n_used)
             print(f"  {k:6s}: {p_hat * 100:7.3f}%  (±{moe * 100:5.3f}%)")
+        if objective == "win" and win_validation_prob is not None and opt_vol_source != sim_vol_source:
+            print(
+                f"\nWin portfolio selection used {opt_vol_source.upper()}-TERM vols: "
+                f"validation P1st={win_validation_prob * 100:.6f}%."
+            )
+            print(
+                f"Final reporting uses {sim_vol_source.upper()}-TERM vols: "
+                f"P1st={float(pa['P1st']) * 100:.6f}%."
+            )
     else:
         print(f"\nAnchor {anchor_name!r} is not in the leaderboard, so no anchor-specific finish probabilities were printed.")
 
@@ -1984,12 +2291,14 @@ if __name__ == "__main__":
     parser.add_argument("--inner_sims", type=int, default=None, help="Inner simulations for --objective win.")
     parser.add_argument("--rounds", type=int, default=None, help="Optimisation rounds for --objective te, max_te, vol_te, factor_te, or win.")
     parser.add_argument("--samples", type=int, default=None, help="Samples per round for --objective te, max_te, vol_te, factor_te, or win.")
+    parser.add_argument("--win-restarts", type=int, default=None, help="Deterministic search restarts for --objective win.")
+    parser.add_argument("--win-validation-sims", type=int, default=None, help="Independent simulations used to select the final --objective win candidate.")
     parser.add_argument("--factor-index", type=int, default=None, help="1-based leaderboard SVD factor rank used by --objective factor_te.")
     parser.add_argument("--factor-te-direction", choices=["max", "min"], default=None, help="Whether --objective factor_te maximises or minimises tracking error versus the selected factor.")
     parser.add_argument("--vol-te-vol-weight", type=float, default=None, help="Weight on absolute portfolio volatility for --objective vol_te.")
     parser.add_argument("--vol-te-te-weight", type=float, default=None, help="Weight on benchmark tracking error for --objective vol_te.")
     parser.add_argument("--te-benchmark-scope", choices=["full", "ahead"], default=None, help="Benchmark scope for --objective max_te or vol_te. full uses all non-anchor portfolios; ahead uses portfolios with Value >= anchor Value.")
-    parser.add_argument("--benchmark-exclude-players", type=str, default=None, help="Comma-separated leaderboard player names to exclude only from weighted benchmark calculation.")
+    parser.add_argument("--benchmark-exclude-players", type=str, default=None, help="Comma-separated leaderboard player names to exclude from all leaderboard-based calculations in this script.")
 
     parser.add_argument("--exclude", type=str, default=None, help="Comma-separated tickers to exclude from optimisation universe.")
     parser.add_argument("--forced", type=str, default=None, help='Forced holdings, e.g. "AAPL=25,NVDA=15,SHOP=10".')
@@ -2039,6 +2348,8 @@ if __name__ == "__main__":
     inner_sims = int(choose(args.inner_sims, config, "win_objective", "inner_sims", 12_000))
     rounds = int(choose(args.rounds, config, "win_objective", "rounds", 8))
     samples = int(choose(args.samples, config, "win_objective", "samples", 450))
+    win_restarts = int(choose(args.win_restarts, config, "win_objective", "restarts", 4))
+    win_validation_sims = int(choose(args.win_validation_sims, config, "win_objective", "validation_sims", 100_000))
     factor_index = int(choose(args.factor_index, config, "run", "factor_index", 1))
     factor_te_direction = str(choose(args.factor_te_direction, config, "run", "factor_te_direction", "max")).strip().lower()
     vol_te_vol_weight = float(choose(args.vol_te_vol_weight, config, "vol_te_objective", "vol_weight", 0.5))
@@ -2070,6 +2381,10 @@ if __name__ == "__main__":
         raise ValueError("At least one vol_te weight must be positive.")
     if te_benchmark_scope not in {"full", "ahead"}:
         raise ValueError(f"te_benchmark_scope must be one of ['full', 'ahead']; got {te_benchmark_scope!r}.")
+    if inner_sims <= 0 or rounds <= 0 or samples <= 0:
+        raise ValueError("inner_sims, rounds, and samples must be positive integers.")
+    if win_restarts <= 0 or win_validation_sims <= 0:
+        raise ValueError("win_restarts and win_validation_sims must be positive integers.")
 
     print(
         f"Objective: {objective} | anchor={anchor} | corr={corr_file} | "
@@ -2096,6 +2411,8 @@ if __name__ == "__main__":
         inner_sims=inner_sims,
         rounds=rounds,
         samples=samples,
+        win_restarts=win_restarts,
+        win_validation_sims=win_validation_sims,
         exclude_tickers=exclude,
         forced_holdings=forced,
         max_cash=max_cash,

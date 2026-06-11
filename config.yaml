@@ -23,6 +23,8 @@ win_objective:
   inner_sims: 12000
   rounds: 8
   samples: 450
+  restarts: 4
+  validation_sims: 100000
 
 final_simulation:
   sims: 400000
